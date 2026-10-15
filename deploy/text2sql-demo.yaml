@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Mini-Agent Text-to-SQL demo (Bedrock Claude + mcp-clickhouse + ClickHouse on one EC2),
+  exposed only through CloudFront. Origin SG admits the CloudFront origin-facing prefix
+  list only; a CloudFront Function restricts viewers to 120/8, 129/8, 27/8. No SSH (use SSM).
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket holding the app tarball
+  ArtifactKey:
+    Type: String
+    Default: text2sql/app.tar.gz
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet (auto-assign public IP) so the instance can pull packages and serve CloudFront
+  CloudFrontPrefixList:
+    Type: String
+    Default: pl-82a045eb
+    Description: com.amazonaws.global.cloudfront.origin-facing in this region
+  InstanceType:
+    Type: String
+    Default: t3.large
+  BedrockModel:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: text2sql-demo
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeClaude
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*anthropic.claude*
+                  - arn:aws:bedrock:*::foundation-model/anthropic.claude*
+              - Sid: ReadArtifact
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:aws:s3:::${ArtifactBucket}/${ArtifactKey}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  OriginSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: text2sql demo origin - CloudFront origin-facing only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourcePrefixListId: !Ref CloudFrontPrefixList
+          Description: CloudFront origin-facing
+      Tags:
+        - { Key: Name, Value: text2sql-demo-origin }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmi
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref OriginSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 2 }
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 30, VolumeType: gp3, Encrypted: true }
+      Tags:
+        - { Key: Name, Value: text2sql-demo }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee -a /var/log/text2sql-bootstrap.log) 2>&1
+          set -eux
+          export AWS_REGION=${AWS::Region}
+          mkdir -p /opt/text2sql
+          until aws s3 cp s3://${ArtifactBucket}/${ArtifactKey} /tmp/app.tar.gz; do sleep 10; done
+          tar -xzf /tmp/app.tar.gz -C /opt/text2sql
+          mkdir -p /etc/systemd/system/text2sql.service.d
+          printf '[Service]\nEnvironment=BEDROCK_MODEL=${BedrockModel}\n' > /etc/systemd/system/text2sql.service.d/model.conf
+          bash /opt/text2sql/deploy/bootstrap.sh
+
+  ViewerIpAllowlist:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub ${AWS::StackName}-viewer-ip-allowlist
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Allow viewers from 120.0.0.0/8, 129.0.0.0/8, 27.0.0.0/8 only
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        var ALLOWED_FIRST_OCTETS = { '120': true, '129': true, '27': true };
+        function handler(event) {
+          var ip = event.viewer.ip || '';
+          if (ALLOWED_FIRST_OCTETS[ip.split('.')[0]] && ip.indexOf(':') === -1) {
+            return event.request;
+          }
+          return { statusCode: 403, statusDescription: 'Forbidden',
+                   headers: { 'content-type': { value: 'text/plain' } },
+                   body: 'Forbidden: viewer IP not in allowlist' };
+        }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: text2sql demo
+        IPV6Enabled: false            # allowlist is IPv4-only
+        PriceClass: PriceClass_All
+        Origins:
+          - Id: ec2-origin
+            DomainName: !GetAtt Instance.PublicDnsName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 8080
+              OriginReadTimeout: 60     # agent turns usually take 10-40s; 60s is the default max
+              OriginKeepaliveTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: ec2-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # Managed-CachingDisabled
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # Managed-AllViewerExceptHostHeader
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt ViewerIpAllowlist.FunctionMetadata.FunctionARN
+
+Outputs:
+  Url:
+    Value: !Sub https://${Distribution.DomainName}/
+  InstanceId:
+    Value: !Ref Instance
+  SecurityGroupId:
+    Value: !Ref OriginSecurityGroup
