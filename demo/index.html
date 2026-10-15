@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Text-to-SQL Demo · Mini-Agent + ClickHouse</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1f2328; --muted:#656d76; --accent:#0969da; --border:#d0d7de; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --card:#161b22; --text:#e6edf3; --muted:#8d96a0; --accent:#4493f8; --border:#30363d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:14px 20px; border-bottom:1px solid var(--border); background:var(--card); }
+  header h1 { margin:0; font-size:17px; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:13px; }
+  main { max-width:900px; margin:0 auto; padding:16px 16px 140px; }
+  .msg { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 16px; margin:12px 0; }
+  .msg.user { border-left:4px solid var(--accent); }
+  .meta { color:var(--muted); font-size:12px; margin-top:6px; }
+  .msg table { border-collapse:collapse; margin:8px 0; }
+  .msg th, .msg td { border:1px solid var(--border); padding:4px 10px; }
+  .msg pre { background:var(--bg); color:var(--text); padding:10px; border-radius:6px; overflow-x:auto; }
+  .examples button { margin:4px 6px 0 0; padding:4px 10px; border:1px solid var(--border); border-radius:14px;
+                     background:var(--card); color:var(--text); cursor:pointer; font-size:13px; }
+  footer { position:fixed; bottom:0; left:0; right:0; background:var(--card); border-top:1px solid var(--border); padding:12px; }
+  form { max-width:900px; margin:0 auto; display:flex; gap:8px; }
+  textarea { flex:1; resize:none; height:52px; padding:8px; border:1px solid var(--border); border-radius:8px;
+             background:var(--bg); color:var(--text); font:inherit; }
+  button.send { padding:0 20px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-size:15px; cursor:pointer; }
+  button.send:disabled { opacity:.5; cursor:wait; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Text-to-SQL Demo</h1>
+  <p>Mini-Agent（OTel 埋点版）+ Bedrock Claude Sonnet 4.6 + mcp-clickhouse · 数据为合成的直播送礼数据</p>
+</header>
+<main id="chat">
+  <div class="msg">
+    你好，我可以用自然语言查询 <code>live</code> 库（用户、礼物、送礼明细）。试试：
+    <div class="examples">
+      <button>有哪些表？各自是干什么的？</button>
+      <button>9 月各国家的送礼流水排名</button>
+      <button>最近 7 天每天的流水和送礼人数</button>
+      <button>收礼流水 Top 10 主播及其国家</button>
+      <button>ads 渠道用户的人均送礼金额比 organic 高吗？</button>
+    </div>
+  </div>
+</main>
+<footer>
+  <form id="f">
+    <textarea id="q" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+    <button class="send" id="send">发送</button>
+  </form>
+</footer>
+<script>
+const chat = document.getElementById('chat'), q = document.getElementById('q'), sendBtn = document.getElementById('send');
+let sessionId = null;
+
+function render(md) {
+  if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(md));
+  const d = document.createElement('div'); d.textContent = md; return '<pre>' + d.innerHTML + '</pre>';
+}
+function add(cls, html) {
+  const el = document.createElement('div'); el.className = 'msg ' + cls; el.innerHTML = html;
+  chat.appendChild(el); el.scrollIntoView({behavior: 'smooth'}); return el;
+}
+async function ask(text) {
+  if (!text.trim()) return;
+  add('user', render(text));
+  const pending = add('bot', '<span class="meta">思考中…（查表结构、写 SQL、执行，通常 10~40 秒）</span>');
+  sendBtn.disabled = true; q.value = '';
+  try {
+    const r = await fetch('api/ask', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                      body: JSON.stringify({question: text, session_id: sessionId})});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    sessionId = data.session_id;
+    pending.innerHTML = render(data.answer) +
+      `<div class="meta">耗时 ${data.elapsed_s}s · 工具调用 ${data.tool_calls} 次 · 执行 SQL ${data.sql.length} 条</div>`;
+  } catch (e) {
+    pending.innerHTML = render('**出错了：** ' + e.message);
+  } finally { sendBtn.disabled = false; }
+}
+document.getElementById('f').onsubmit = e => { e.preventDefault(); ask(q.value); };
+q.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(q.value); } };
+document.querySelectorAll('.examples button').forEach(b => b.onclick = () => ask(b.textContent));
+</script>
+</body>
+</html>

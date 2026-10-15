@@ -58,6 +58,14 @@ class LLMClient:
         self.model = model
         self.retry_config = retry_config or RetryConfig()
 
+        if provider == LLMProvider.BEDROCK:
+            # api_base carries the AWS region for Bedrock (e.g. "us-west-2").
+            self.api_base = api_base
+            self._client = AnthropicClient(
+                api_key="", model=model, retry_config=retry_config, bedrock_region=api_base,
+            )
+            return
+
         # Normalize api_base (remove trailing slash)
         api_base = api_base.rstrip("/")
 

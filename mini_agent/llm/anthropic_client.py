@@ -27,6 +27,7 @@ class AnthropicClient(LLMClientBase):
         api_base: str = "https://api.minimaxi.com/anthropic",
         model: str = "MiniMax-M2.5",
         retry_config: RetryConfig | None = None,
+        bedrock_region: str | None = None,
     ):
         """Initialize Anthropic client.
 
@@ -39,11 +40,15 @@ class AnthropicClient(LLMClientBase):
         super().__init__(api_key, api_base, model, retry_config)
 
         # Initialize Anthropic async client
-        self.client = anthropic.AsyncAnthropic(
-            base_url=api_base,
-            api_key=api_key,
-            default_headers={"Authorization": f"Bearer {api_key}"},
-        )
+        if bedrock_region:
+            # Same Messages API, served by Bedrock; auth via the standard AWS credential chain.
+            self.client = anthropic.AsyncAnthropicBedrock(aws_region=bedrock_region)
+        else:
+            self.client = anthropic.AsyncAnthropic(
+                base_url=api_base,
+                api_key=api_key,
+                default_headers={"Authorization": f"Bearer {api_key}"},
+            )
 
     async def _make_api_request(
         self,

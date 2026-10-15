@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,10 @@ from typing import Any, Literal
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+try:
+    from mcp.client.streamable_http import streamablehttp_client
+except ImportError:  # newer mcp renamed it
+    from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
 
 from .base import Tool, ToolResult
 
@@ -70,7 +74,8 @@ class MCPTool(Tool):
     ):
         self._name = name
         self._description = description
-        self._parameters = parameters
+        # Anthropic/Bedrock require input_schema.type; some MCP servers omit it for no-arg tools.
+        self._parameters = {"type": "object", "properties": {}, **(parameters or {})}
         self._session = session
         self._execute_timeout = execute_timeout
 
@@ -104,8 +109,16 @@ class MCPTool(Tool):
                     content_parts.append(str(item))
 
             content_str = "\n".join(content_parts)
+            # Guard the context window: one oversized result (e.g. groupArray over a fact
+            # table) can push the next prompt past the model's limit.
+            max_chars = int(os.getenv("MCP_MAX_RESULT_CHARS", "20000"))
+            if len(content_str) > max_chars:
+                content_str = (
+                    content_str[:max_chars]
+                    + f"\n...[truncated: result was {len(content_str)} chars; aggregate in SQL or add LIMIT]"
+                )
 
-            is_error = result.isError if hasattr(result, "isError") else False
+            is_error = bool(getattr(result, "isError", None) or getattr(result, "is_error", None))
 
             return ToolResult(success=not is_error, content=content_str, error=None if not is_error else "Tool returned error")
 
@@ -197,7 +210,8 @@ class MCPServerConnection:
             # Wrap each tool with execute timeout
             execute_timeout = self._get_execute_timeout()
             for tool in tools_list.tools:
-                parameters = tool.inputSchema if hasattr(tool, "inputSchema") else {}
+                # mcp SDK renamed inputSchema -> input_schema in newer releases
+                parameters = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None) or {}
                 mcp_tool = MCPTool(
                     name=tool.name,
                     description=tool.description or "",

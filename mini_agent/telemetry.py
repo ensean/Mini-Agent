@@ -142,7 +142,8 @@ def traced_generate(fn):
             _stamp_session(span)
             span.set_attribute("gen_ai.operation.name", "chat")
             provider = getattr(self, "provider", "")
-            span.set_attribute("gen_ai.provider.name", str(getattr(provider, "value", provider)))
+            provider = str(getattr(provider, "value", provider))
+            span.set_attribute("gen_ai.provider.name", "aws.bedrock" if provider == "bedrock" else provider)
             span.set_attribute("gen_ai.request.model", model)
             if _capture_content():
                 system = [m for m in messages if m.role == "system"]

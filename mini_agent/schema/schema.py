@@ -9,6 +9,7 @@ class LLMProvider(str, Enum):
 
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    BEDROCK = "bedrock"  # Anthropic models on Amazon Bedrock (AWS credential chain, no API key)
 
 
 class FunctionCall(BaseModel):
