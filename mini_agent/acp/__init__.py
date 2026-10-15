@@ -37,6 +37,7 @@ from mini_agent.config import Config
 from mini_agent.llm import LLMClient
 from mini_agent.retry import RetryConfig as RetryConfigBase
 from mini_agent.schema import Message
+from mini_agent.telemetry import traced_agent_turn, traced_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class MiniMaxACPAgent:
         if state:
             state.cancelled = True
 
+    @traced_agent_turn(lambda self, state, *a, **kw: state.agent)
     async def _run_turn(self, state: SessionState, session_id: str) -> str:
         agent = state.agent
         for _ in range(agent.max_steps):
@@ -154,7 +156,7 @@ class MiniMaxACPAgent:
                     text, status = f"[ERROR] Unknown tool: {name}", "failed"
                 else:
                     try:
-                        result = await tool.execute(**args)
+                        result = await traced_tool_call(tool, call.id, args)
                         status = "completed" if result.success else "failed"
                         prefix = "[OK]" if result.success else "[ERROR]"
                         text = f"{prefix} {result.content if result.success else result.error or 'Tool execution failed'}"
