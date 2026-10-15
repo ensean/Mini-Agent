@@ -7,6 +7,7 @@ This module provides a unified interface for different LLM providers
 import logging
 
 from ..retry import RetryConfig
+from ..telemetry import traced_generate
 from ..schema import LLMProvider, LLMResponse, Message
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
@@ -110,6 +111,7 @@ class LLMClient:
         """Set retry callback."""
         self._client.retry_callback = value
 
+    @traced_generate
     async def generate(
         self,
         messages: list[Message],
