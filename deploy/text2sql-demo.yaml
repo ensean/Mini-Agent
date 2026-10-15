@@ -5,12 +5,12 @@ Description: >
   list only; a CloudFront Function restricts viewers to 120/8, 129/8, 27/8. No SSH (use SSM).
 
 Parameters:
-  ArtifactBucket:
+  RepoUrl:
     Type: String
-    Description: S3 bucket holding the app tarball
-  ArtifactKey:
+    Default: https://github.com/ensean/Mini-Agent.git
+  RepoBranch:
     Type: String
-    Default: text2sql/app.tar.gz
+    Default: text2sql-demo
   VpcId:
     Type: AWS::EC2::VPC::Id
   SubnetId:
@@ -55,10 +55,6 @@ Resources:
                 Resource:
                   - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*anthropic.claude*
                   - arn:aws:bedrock:*::foundation-model/anthropic.claude*
-              - Sid: ReadArtifact
-                Effect: Allow
-                Action: s3:GetObject
-                Resource: !Sub arn:aws:s3:::${ArtifactBucket}/${ArtifactKey}
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -99,9 +95,8 @@ Resources:
           exec > >(tee -a /var/log/text2sql-bootstrap.log) 2>&1
           set -eux
           export AWS_REGION=${AWS::Region}
-          mkdir -p /opt/text2sql
-          until aws s3 cp s3://${ArtifactBucket}/${ArtifactKey} /tmp/app.tar.gz; do sleep 10; done
-          tar -xzf /tmp/app.tar.gz -C /opt/text2sql
+          dnf install -y git
+          until git clone --depth 1 --branch ${RepoBranch} ${RepoUrl} /opt/text2sql; do sleep 10; done
           mkdir -p /etc/systemd/system/text2sql.service.d
           printf '[Service]\nEnvironment=BEDROCK_MODEL=${BedrockModel}\n' > /etc/systemd/system/text2sql.service.d/model.conf
           bash /opt/text2sql/deploy/bootstrap.sh
