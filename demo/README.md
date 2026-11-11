@@ -43,5 +43,7 @@ export AWS_PROFILE=<profile> AWS_REGION=ap-northeast-1
 PROFILE=<profile> REGION=ap-northeast-1 bash deploy/deploy_ec2.sh   # ALLOW_CIDRS=1.2.3.4/32 to override
 ```
 
-The step-by-step guide (Chinese, with screenshots and troubleshooting) is in the Feishu doc linked
-from the PR / branch description.
+Step-by-step guide (Chinese, with verified outputs, screenshots and troubleshooting):
+https://qi1g2b1825p.feishu.cn/docx/STTRdgXpVotpXPxJRt4cwUh3nnd
+General background on instrumenting a custom agent for AgentCore:
+https://qi1g2b1825p.feishu.cn/docx/Q7BJdraIpov4Jkxk2G9c26S6nPf
