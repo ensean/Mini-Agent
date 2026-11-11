@@ -19,7 +19,7 @@ HERE = Path(__file__).parent
 BUILTIN = [
     "Builtin.Correctness",            # TRACE   - vs expected_response
     "Builtin.Helpfulness",            # TRACE
-    "Builtin.InstructionFollowing",   # TRACE   - vs system prompt rules (LIMIT, SQL block, ...)
+    "Builtin.InstructionFollowing",   # TRACE   - did it fulfil the user's request (refusals score 0)
     "Builtin.GoalSuccessRate",        # SESSION - vs assertions
     "Builtin.TrajectoryInOrderMatch", # SESSION - vs expected_trajectory
     "Builtin.ToolSelectionAccuracy",  # TOOL_CALL
