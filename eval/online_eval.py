@@ -87,7 +87,25 @@ def main():
     account = session().client("sts").get_caller_identity()["Account"]
     role_arn = ensure_role(account)
     evaluators = ONLINE_EVALUATORS + [e for e in [find_evaluator_id(CUSTOM_ONLINE_EVALUATOR_NAME)] if e]
-    r = cp.create_online_evaluation_config(
+    # A just-created execution role may not have propagated yet; the service then rejects it
+    # with "execution role does not have permissions to access the specified log groups".
+    for attempt in range(8):
+        try:
+            r = create(cp, evaluators, role_arn)
+            break
+        except cp.exceptions.ValidationException as e:
+            if "execution role" not in str(e) or attempt == 7:
+                raise
+            print("  execution role not usable yet (IAM propagation), retrying in 15s ...")
+            time.sleep(15)
+    cid = r["onlineEvaluationConfigId"]
+    print(f"created {CONFIG_NAME}: {cid} ({r.get('status')})")
+    print(f"results -> /aws/bedrock-agentcore/evaluations/results/{cid}, "
+          "metrics -> namespace Bedrock-AgentCore/Evaluations")
+
+
+def create(cp, evaluators, role_arn):
+    return cp.create_online_evaluation_config(
         onlineEvaluationConfigName=CONFIG_NAME,
         description=f"Online evaluation for {AGENT_NAME} (self-hosted on EC2)",
         rule={"samplingConfig": {"samplingPercentage": SAMPLING_PCT},
@@ -97,10 +115,6 @@ def main():
         evaluationExecutionRoleArn=role_arn,
         enableOnCreate=True,
     )
-    cid = r["onlineEvaluationConfigId"]
-    print(f"created {CONFIG_NAME}: {cid} ({r.get('status')})")
-    print(f"results -> /aws/bedrock-agentcore/evaluations/results/{cid}, "
-          "metrics -> namespace Bedrock-AgentCore/Evaluations")
 
 
 if __name__ == "__main__":
