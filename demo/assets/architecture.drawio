@@ -1,0 +1,118 @@
+<mxfile host="localhost">
+  <diagram id="0dn4xenx-fyma" name="Page-1">
+    <mxGraphModel dx="1362" dy="913" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="users" parent="1" style="shape=mxgraph.aws4.users;fillColor=#232F3D;strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="用户（浏览器）" vertex="1">
+          <mxGeometry height="60" width="60" x="200" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="replay" parent="1" style="shape=mxgraph.aws4.client;fillColor=#232F3D;strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="eval/replay.py&lt;br&gt;回放评测集" vertex="1">
+          <mxGeometry height="60" width="60" x="600" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="cloud" parent="1" style="shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_aws_cloud_alt;strokeColor=#232F3E;fillColor=none;fontColor=#232F3E;verticalAlign=top;align=left;spacingLeft=30;container=1;collapsible=0;pointerEvents=0;fontStyle=1;whiteSpace=wrap;html=1;" value="AWS Cloud" vertex="1">
+          <mxGeometry height="760" width="1060" x="40" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="waf" parent="cloud" style="resIcon=mxgraph.aws4.waf;fillColor=#DD344C;shape=mxgraph.aws4.resourceIcon;strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="AWS WAF&lt;br&gt;每 IP 100 次 / 5 分钟" vertex="1">
+          <mxGeometry height="60" width="60" x="130" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="cf" parent="cloud" style="resIcon=mxgraph.aws4.cloudfront;fillColor=#8C4FFF;shape=mxgraph.aws4.resourceIcon;strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="Amazon CloudFront" vertex="1">
+          <mxGeometry height="60" width="60" x="340" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="cffn" parent="cloud" style="shape=mxgraph.aws4.cloudfront_functions;fillColor=#8C4FFF;strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="CloudFront Function&lt;br&gt;Basic Auth（KeyValueStore）" vertex="1">
+          <mxGeometry height="48" width="48" x="560" y="46" as="geometry" />
+        </mxCell>
+        <mxCell id="region" parent="cloud" style="shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_region;strokeColor=#00A4A6;fillColor=none;fontColor=#147EBA;dashed=1;verticalAlign=top;align=left;spacingLeft=30;container=1;collapsible=0;pointerEvents=0;whiteSpace=wrap;html=1;" value="ap-northeast-1" vertex="1">
+          <mxGeometry height="540" width="1020" x="20" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="sg" parent="region" style="fillColor=none;strokeColor=#DD3522;dashed=1;verticalAlign=top;align=right;spacingRight=12;fontColor=#DD3522;container=1;collapsible=0;pointerEvents=0;fontSize=12;whiteSpace=wrap;html=1;" value="EC2 t3.large · 安全组仅放行 CloudFront 前缀列表 :8080" vertex="1">
+          <mxGeometry height="210" width="640" x="30" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="app" parent="sg" style="rounded=1;arcSize=8;fillColor=#FDF1E3;strokeColor=#ED7100;fontSize=12;whiteSpace=wrap;html=1;" value="&lt;b&gt;demo/app.py&lt;/b&gt;&lt;br&gt;FastAPI + Mini-Agent&lt;br&gt;telemetry.py：三类 GenAI span&lt;br&gt;ADOT（opentelemetry-instrument）" vertex="1">
+          <mxGeometry height="120" width="240" x="20" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="mcp" parent="sg" style="rounded=1;arcSize=8;fillColor=#FDF1E3;strokeColor=#ED7100;fontSize=12;whiteSpace=wrap;html=1;" value="mcp-clickhouse&lt;br&gt;（stdio 子进程）" vertex="1">
+          <mxGeometry height="70" width="120" x="330" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="ch" parent="sg" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#FDF1E3;strokeColor=#ED7100;fontSize=12;whiteSpace=wrap;html=1;" value="ClickHouse&lt;br&gt;Docker · 127.0.0.1" vertex="1">
+          <mxGeometry height="80" width="100" x="520" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bedrock" parent="region" style="resIcon=mxgraph.aws4.bedrock;fillColor=#01A88D;shape=mxgraph.aws4.resourceIcon;strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="Amazon Bedrock&lt;br&gt;Claude Sonnet 4.6" vertex="1">
+          <mxGeometry height="60" width="60" x="780" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ssm" parent="region" style="shape=mxgraph.aws4.parameter_store;fillColor=#E7157B;strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="SSM Parameter Store&lt;br&gt;basic-auth / origin-verify" vertex="1">
+          <mxGeometry height="48" width="48" x="786" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="xray" parent="region" style="resIcon=mxgraph.aws4.xray;fillColor=#E7157B;shape=mxgraph.aws4.resourceIcon;strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="AWS X-Ray&lt;br&gt;OTLP traces 端点" vertex="1">
+          <mxGeometry height="60" width="60" x="80" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="logs" parent="region" style="shape=mxgraph.aws4.cloudwatch_logs;fillColor=#E7157B;strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="CloudWatch Logs&lt;br&gt;Agent 日志组&lt;br&gt;spans + runtime-logs" vertex="1">
+          <mxGeometry height="48" width="48" x="296" y="356" as="geometry" />
+        </mxCell>
+        <mxCell id="ac" parent="region" style="rounded=1;arcSize=4;fillColor=#E6F6F3;strokeColor=#01A88D;verticalAlign=top;fontColor=#016B5A;fontStyle=1;fontSize=13;container=1;collapsible=0;pointerEvents=0;whiteSpace=wrap;html=1;" value="Amazon Bedrock AgentCore" vertex="1">
+          <mxGeometry height="200" width="510" x="480" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="obs" parent="ac" style="resIcon=mxgraph.aws4.cloudwatch_2;fillColor=#E7157B;shape=mxgraph.aws4.resourceIcon;strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="GenAI Observability&lt;br&gt;会话 / trace 看板" vertex="1">
+          <mxGeometry height="60" width="60" x="50" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="batch" parent="ac" style="resIcon=mxgraph.aws4.bedrock;fillColor=#01A88D;shape=mxgraph.aws4.resourceIcon;strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="批量评测&lt;br&gt;带标准答案" vertex="1">
+          <mxGeometry height="60" width="60" x="225" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="online" parent="ac" style="resIcon=mxgraph.aws4.bedrock;fillColor=#01A88D;shape=mxgraph.aws4.resourceIcon;strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontSize=12;html=1;" value="在线评测&lt;br&gt;线上流量抽样" vertex="1">
+          <mxGeometry height="60" width="60" x="400" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="users" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#545B64;fontSize=11;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=1;exitY=0.3;entryX=0.25;entryY=0;html=1;" target="cf" value="HTTPS">
+          <mxGeometry relative="1" x="-0.45" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="replay" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#545B64;fontSize=11;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=0;exitY=0.75;entryX=0.75;entryY=0;html=1;" target="cf" value="HTTPS + Basic Auth">
+          <mxGeometry relative="1" x="-0.4" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="waf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;strokeColor=#879196;fontSize=11;fontColor=#545B64;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;startArrow=open;endArrow=none;html=1;" target="cf" value="关联 Web ACL">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="cf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;strokeColor=#879196;fontSize=11;fontColor=#545B64;labelBackgroundColor=#ffffff;endArrow=open;exitX=1;exitY=0.5;entryX=0;entryY=0.5;html=1;" target="cffn" value="viewer-request">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="cf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#545B64;fontSize=11;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=1;exitY=0.85;entryX=0.15;entryY=0;html=1;" target="app" value="回源 :8080 + X-Origin-Verify">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="480" y="231" />
+              <mxPoint x="480" y="308" />
+              <mxPoint x="146" y="308" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="app" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#545B64;fontSize=11;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;html=1;" target="mcp" value="MCP">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="mcp" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#545B64;fontSize=11;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;html=1;" target="ch" value="SQL（只读）">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="app" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#545B64;fontSize=11;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=0.85;exitY=0;entryX=0;entryY=0.5;html=1;" target="bedrock" value="Messages API">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="314" y="372" />
+              <mxPoint x="760" y="372" />
+              <mxPoint x="760" y="430" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="ssm" style="edgeStyle=orthogonalEdgeStyle;rounded=1;dashed=1;strokeColor=#879196;fontSize=11;fontColor=#545B64;labelBackgroundColor=#ffffff;endArrow=open;exitX=0;exitY=0.5;entryX=1;entryY=0.95;html=1;" target="app" value="启动时读取源站密钥">
+          <mxGeometry relative="1" x="-0.7" y="-12" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" edge="1" parent="1" source="app" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#E7157B;strokeWidth=2;fontSize=11;fontColor=#B0084D;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=0.2;exitY=1;entryX=0.5;entryY=0;html=1;" target="xray" value="OTLP spans">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" edge="1" parent="1" source="app" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#E7157B;strokeWidth=2;fontSize=11;fontColor=#B0084D;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=0.85;exitY=1;entryX=0.5;entryY=0;html=1;" target="logs" value="OTLP 日志 / EMF">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" edge="1" parent="1" source="xray" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#E7157B;strokeWidth=2;fontSize=11;fontColor=#B0084D;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;html=1;" target="logs" value="写入 spans 流">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" edge="1" parent="1" source="logs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#E7157B;strokeWidth=2;fontSize=11;fontColor=#B0084D;labelBackgroundColor=#ffffff;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.35;html=1;" target="ac" value="按 session.id&lt;br&gt;读取 span">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -22,24 +22,9 @@
 
 ## 架构
 
-```mermaid
-flowchart TB
-  U["浏览器 / eval/replay.py"] --> CF["CloudFront<br/>WAF 每 IP 限速 + Basic Auth"]
-  CF -->|"前缀列表 :8080 + X-Origin-Verify"| APP
-  subgraph EC2["EC2（SSM 登录，无 0.0.0.0/0 入站）"]
-    direction LR
-    APP["demo/app.py<br/>FastAPI + Mini-Agent<br/>opentelemetry-instrument"] -->|stdio| MCP["mcp-clickhouse"] --> CH[("ClickHouse")]
-  end
-  APP -->|Messages API| BR["Bedrock Claude"]
-  APP -->|"ADOT OTLP"| LG["Agent 日志组<br/>runtimes/{agent}"]
-  subgraph AC["AgentCore"]
-    direction LR
-    OBS["GenAI Observability"]
-    BE["批量评测"]
-    OE["在线评测"]
-  end
-  LG --> OBS & BE & OE
-```
+![架构图](assets/architecture.png)
+
+<sub>源文件：[`assets/architecture.drawio`](assets/architecture.drawio)，可用 draw.io 打开编辑。</sub>
 
 span 和日志都写进 Agent 自己的日志组，所以评测的数据源只需要配这一个日志组，再按 `service.name` 过滤即可。
 
