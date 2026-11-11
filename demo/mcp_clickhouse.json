@@ -12,6 +12,7 @@
         "CLICKHOUSE_SECURE": "false",
         "CLICKHOUSE_VERIFY": "false"
       },
+      "connect_timeout": 60,
       "execute_timeout": 60
     }
   }
