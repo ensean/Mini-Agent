@@ -262,6 +262,41 @@ aws logs start-query --profile <profile> --region ap-northeast-1 \
 # 再用 aws logs get-query-results --query-id <id> 取结果，按 (session_id, target_id, evaluator) 去重后写入平台
 ```
 
+### 拉取方式的实现要点
+
+下面这些做法参考了 [AgentCore Launchpad](https://github.com/aws-samples/sample-agentcore-launchpad)。它是基于 AgentCore 的示例 Agent 运维平台，可观测和评测页面全部由后端实时查 CloudWatch 得到，不另外同步数据（只把批量评测的汇总分数存进自己的库）。适合按需查看的场景；需要长期留存或做跨期报表时，再配合上表里的订阅或定时同步。
+
+**1. 用 `SOURCE` 前缀一次查多个日志组。** 不需要先列出所有 Agent 或评测配置，也不受 `logGroupNames` 最多 50 个日志组的限制。调用 `StartQuery` 时不要传日志组参数：
+
+```text
+# 所有 Agent 的 span（托管在 Runtime 上的 Agent 和自托管 Agent 都覆盖）
+SOURCE logGroups(namePrefix: ['aws/spans', '/aws/bedrock-agentcore/runtimes/'])
+| filter ispresent(name) and attributes.session.id = "<session_id>"
+
+# 所有在线评测配置的结果
+SOURCE logGroups(namePrefix: ['/aws/bedrock-agentcore/evaluations/results/'])
+| filter name = "gen_ai.evaluation.result"
+| stats avg(attributes.gen_ai.evaluation.score.value) as mean, count(*) as n
+    by attributes.gen_ai.evaluation.name, onlineEvaluationConfigId
+```
+
+Agent 日志组里 span 和普通日志混在一起，所以要加 `ispresent(name)`，只留下真正的 span。
+
+**2. 批量评测：汇总分数用 API，明细读日志流。** `GetBatchEvaluation` 的 `evaluationResults.evaluatorSummaries[].statistics.averageScore` 就是各 evaluator 的均分。每条明细和失败原因，按 `outputConfig.cloudWatchConfig` 给出的 `logGroupName` / `logStreamName`（形如 `run-<batchEvaluationId>`）直接读那一个日志流，不用自己按时间去搜。Launchpad 还记录了一个情况：代码类 evaluator 的 `statistics` 可能是空的，这时要从明细自己算均分。
+
+**3. span 明细用 Logs Insights 查，不用 `FilterLogEvents`。** `FilterLogEvents` 从 startTime 往后扫，分页有上限，窗口一长就可能什么都拿不到。Launchpad 实测在 72 小时的窗口里一条 span 都没取到，所以改成了 Insights。`FilterLogEvents` 只适合范围小、位置明确的读取，比如上面那种单个结果日志流。
+
+**4. 控制查询成本和失败处理。**
+- Logs Insights 按扫描量计费，后端对相同查询加短 TTL 缓存（Launchpad 用 60 秒），并发请求同一个 key 时只发一次查询。
+- 给轮询设期限，超时就调用 `StopQuery`，否则丢掉的查询还会继续计费。
+- 遇到限流退避后重试；日志组不存在（新账号还没有流量）时返回空结果，不要报错。
+
+**5. 防止查询注入。** session ID、trace ID 要拼进查询字符串，所以先用正则校验，至少排除 `"`、`\`、`|` 这几个字符。
+
+**6. 统计 token 时注意重复计数。** 有些框架会在多个 span 上记同一次调用的 usage：`invoke_agent` span 会汇总子 span 的用量，Strands 每次模型调用会产生两个 span。直接求和会多算，所以只对真正的模型调用 span 求和。本 demo 只在 chat span 上记 usage，没有这个问题。
+
+**7. 按需评测单个会话。** 先用 Insights 把这个会话的原始 span 拉回来（解析 `@message`），再调用数据面的 `Evaluate` API（`evaluationInput.sessionSpans`），同步返回分数。适合平台上"现在评一下"这类按钮，不需要事先建在线评测配置。
+
 集成用的身份只需要读权限：拉取方式要结果日志组上的 `logs:StartQuery`，以及 `logs:GetQueryResults`、`cloudwatch:GetMetricData`；订阅方式由管理员一次性配置 `logs:PutSubscriptionFilter`，再给 Firehose 或 Lambda 配一个投递角色。
 
 ## 访问控制
