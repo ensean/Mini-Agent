@@ -59,5 +59,8 @@ docs/assets/preview.html
 
 CLAUDE.md
 
-.agent_memory.json.venv/
+.agent_memory.json
+.venv/
 demo/workspace/
+demo/otel.env
+eval/out/

@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "clickhouse": {
+      "description": "mcp-clickhouse against the loopback ClickHouse started by demo/clickhouse.sh",
+      "command": "uvx",
+      "args": ["mcp-clickhouse==0.7.0"],
+      "env": {
+        "CLICKHOUSE_HOST": "127.0.0.1",
+        "CLICKHOUSE_PORT": "8123",
+        "CLICKHOUSE_USER": "demo",
+        "CLICKHOUSE_PASSWORD": "demo",
+        "CLICKHOUSE_SECURE": "false",
+        "CLICKHOUSE_VERIFY": "false"
+      },
+      "execute_timeout": 60
+    }
+  }
+}

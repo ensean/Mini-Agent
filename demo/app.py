@@ -1,10 +1,14 @@
 """Text-to-SQL demo on Mini-Agent: Bedrock Claude + mcp-clickhouse, with OTel GenAI spans.
 
-Run:  uvicorn demo.app:app --host 127.0.0.1 --port 8080
+Run:  bash demo/run.sh            (wraps uvicorn with ADOT's opentelemetry-instrument)
 Env:
-    BEDROCK_REGION   (default us-west-2)
+    BEDROCK_REGION   (default ap-northeast-1)
     BEDROCK_MODEL    (default global.anthropic.claude-sonnet-4-6)
-    MCP_CONFIG       (default demo/mcp.json)
+    MCP_CONFIG       (default demo/mcp_clickhouse.json)
+
+Each browser conversation / eval scenario is one session: the session_id is put in OTel
+baggage around Agent.run(), and mini_agent.telemetry stamps it on every span as
+`session.id`, which is how AgentCore groups turns into sessions.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from mini_agent.schema import LLMProvider
 from mini_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async
 
 HERE = Path(__file__).parent
-REGION = os.getenv("BEDROCK_REGION", "us-west-2")
+REGION = os.getenv("BEDROCK_REGION", os.getenv("AWS_REGION", "ap-northeast-1"))
 MODEL = os.getenv("BEDROCK_MODEL", "global.anthropic.claude-sonnet-4-6")
 MAX_SESSIONS = 200
 SQL_TOOLS = {"run_select_query", "run_query", "run_chdb_select_query"}
@@ -53,7 +57,7 @@ SYSTEM_PROMPT = """你是一个 ClickHouse 数据分析助手，把用户的中�
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    session_id: str | None = None
+    session_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{8,128}$")
 
 
 class AskResponse(BaseModel):
@@ -76,7 +80,7 @@ _state: dict = {"tools": [], "llm": None, "sessions": {}}
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    _state["tools"] = await load_mcp_tools_async(os.getenv("MCP_CONFIG", str(HERE / "mcp.json")))
+    _state["tools"] = await load_mcp_tools_async(os.getenv("MCP_CONFIG", str(HERE / "mcp_clickhouse.json")))
     if not _state["tools"]:
         raise RuntimeError("no MCP tools loaded; is mcp-clickhouse reachable?")
     _state["llm"] = LLMClient(
