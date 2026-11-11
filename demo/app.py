@@ -14,6 +14,7 @@ baggage around Agent.run(), and mini_agent.telemetry stamps it on every span as
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import tempfile
 import time
@@ -22,7 +23,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Request
+from fastapi.responses import FileResponse, PlainTextResponse
 from opentelemetry import baggage, context
 from pydantic import BaseModel, Field
 
@@ -96,6 +98,20 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Mini-Agent Text-to-SQL demo", lifespan=lifespan)
+ORIGIN_SECRET = os.getenv("ORIGIN_VERIFY_SECRET", "")
+
+
+@app.middleware("http")
+async def verify_origin(request: Request, call_next):
+    """Only accept traffic that came through our CloudFront distribution.
+
+    The SG allows the CloudFront origin-facing prefix list, which every distribution shares, so
+    the distribution adds a secret X-Origin-Verify header and we check it here. Unset (local
+    development) = no check."""
+    if ORIGIN_SECRET and not hmac.compare_digest(
+            request.headers.get("x-origin-verify", ""), ORIGIN_SECRET):
+        return PlainTextResponse("Forbidden", status_code=403)
+    return await call_next(request)
 
 
 def _get_session(session_id: str | None) -> tuple[str, _Session]:

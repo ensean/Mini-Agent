@@ -1,13 +1,15 @@
 """Replay eval/ground_truth.json against the running demo to produce evaluable sessions.
 
     .venv/bin/python eval/replay.py                          # local demo on 127.0.0.1:8080
-    .venv/bin/python eval/replay.py --base-url https://dxxxx.cloudfront.net
+    .venv/bin/python eval/replay.py --base-url https://dxxxx.cloudfront.net --auth agentcore-demo:<password>
 
 Each scenario becomes ONE session (all its turns share a session_id, which the demo puts on
 every span as `session.id`). Writes eval/out/<run_id>.json for batch_eval.py.
 """
 import argparse
+import base64
 import json
+import os
 import time
 import urllib.request
 import uuid
@@ -17,11 +19,14 @@ from pathlib import Path
 HERE = Path(__file__).parent
 
 
+AUTH: dict[str, str] = {}
+
+
 def ask(base_url: str, question: str, session_id: str) -> dict:
     req = urllib.request.Request(
         base_url.rstrip("/") + "/api/ask",
         data=json.dumps({"question": question, "session_id": session_id}).encode(),
-        headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json", **AUTH})
     with urllib.request.urlopen(req, timeout=300) as r:
         return json.load(r)
 
@@ -46,7 +51,11 @@ def main():
     ap.add_argument("--base-url", default="http://127.0.0.1:8080")
     ap.add_argument("--only", nargs="*", help="scenario ids to run (default: all)")
     ap.add_argument("--parallel", type=int, default=4)
+    ap.add_argument("--auth", default=os.getenv("T2S_BASIC_AUTH"),
+                    help="user:password for the CloudFront Basic auth (or env T2S_BASIC_AUTH)")
     args = ap.parse_args()
+    if args.auth:
+        AUTH["Authorization"] = "Basic " + base64.b64encode(args.auth.encode()).decode()
 
     scenarios = json.loads((HERE / "ground_truth.json").read_text())
     if args.only:

@@ -6,6 +6,7 @@ set -euxo pipefail
 APP_DIR=/opt/text2sql
 REGION="${AWS_REGION:-ap-northeast-1}"
 MODEL="${BEDROCK_MODEL:-global.anthropic.claude-sonnet-4-6}"
+NAME="${AGENT_NAME:-text2sql-demo}"
 
 dnf install -y docker git
 systemctl enable --now docker
@@ -47,6 +48,13 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
+# Shared secret CloudFront adds as X-Origin-Verify; the app rejects requests without it.
+# Kept out of the unit file / repo: fetched from SSM at bootstrap (re-run to rotate).
+mkdir -p /etc/systemd/system/text2sql.service.d
+SECRET=$(aws ssm get-parameter --region "$REGION" --name "/$NAME/origin-verify" --with-decryption \
+           --query Parameter.Value --output text)
+install -m 600 /dev/null /etc/systemd/system/text2sql.service.d/origin.conf
+printf '[Service]\nEnvironment=ORIGIN_VERIFY_SECRET=%s\n' "$SECRET" > /etc/systemd/system/text2sql.service.d/origin.conf
 systemctl daemon-reload
 systemctl enable text2sql
 systemctl restart text2sql
