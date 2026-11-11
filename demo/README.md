@@ -1,123 +1,327 @@
-# 基于 Mini-Agent 的 Text-to-SQL Demo，接入 AgentCore Observability 与 Evaluations
+# Mini-Agent Text-to-SQL Demo：接入 AgentCore Observability 与 Evaluations
 
-Mini-Agent + Bedrock Claude + [mcp-clickhouse](https://github.com/ClickHouse/mcp-clickhouse)，用中文业务问题查询一份合成的直播送礼数据，自托管在 EC2 上。
+用一个**自研框架**的 Agent（[Mini-Agent](../README.md)）做中文 Text-to-SQL，自托管在 EC2 上，完整接入 Amazon Bedrock AgentCore：
 
-`mini_agent/telemetry.py` 按 OpenTelemetry GenAI 语义规范产生三类 span（`invoke_agent` / `chat` / `execute_tool`，scope 为 `opentelemetry.instrumentation.mini_agent`），AgentCore Evaluations 通过通用框架（generic framework）路径读取；进程用 ADOT（`opentelemetry-instrument`）启动，把数据导出到 CloudWatch。
+- **Observability**：OpenTelemetry GenAI 埋点 → ADOT → CloudWatch，在 GenAI Observability 看板中按会话和 trace 查看 Agent 的每次模型调用和工具调用。
+- **Evaluations**：用带标准答案的数据集做**批量评测**，同时对线上流量做**在线评测**（抽样自动打分）。
 
+技术栈：Bedrock Claude + [mcp-clickhouse](https://github.com/ClickHouse/mcp-clickhouse) + ClickHouse（合成的直播送礼数据，约 60 万行），以及 FastAPI。整套流程已在 ap-northeast-1 实测跑通（2026-11，ADOT 0.22.0）。
+
+**目录**
+
+- [架构](#架构)
+- [代码结构](#代码结构)
+- [快速开始](#快速开始)
+- [遥测接入要点](#遥测接入要点)
+- [评测](#评测)
+- [访问控制](#访问控制)
+- [IAM 最小权限](#iam-最小权限)
+- [常见问题](#常见问题)
+- [清理](#清理)
+- [扩展方向](#扩展方向)
+
+## 架构
+
+```mermaid
+flowchart LR
+  U["浏览器 / eval/replay.py"] --> CF["CloudFront<br/>WAF 每 IP 限速 + Basic Auth"]
+  CF -->|"CloudFront 前缀列表 :8080<br/>+ X-Origin-Verify 头"| APP
+  subgraph EC2["EC2（SSM 登录，无 0.0.0.0/0 入站）"]
+    APP["demo/app.py<br/>FastAPI + Mini-Agent<br/>opentelemetry-instrument 启动"] -->|stdio| MCP["mcp-clickhouse"]
+    MCP --> CH[("ClickHouse<br/>127.0.0.1")]
+  end
+  APP -->|Messages API| BR["Bedrock Claude"]
+  APP -->|"ADOT OTLP（span + 日志）"| LG["Agent 日志组<br/>/aws/bedrock-agentcore/runtimes/{agent}"]
+  LG --> OBS["GenAI Observability 看板"]
+  LG --> BE["批量评测（带标准答案）"]
+  LG --> OE["在线评测（抽样）"]
 ```
-demo/       app.py（FastAPI + 页面）、mcp_clickhouse.json、seed.sql、clickhouse.sh、run.sh、otel.env.example
-eval/       dataset.json -> ground_truth.json、replay.py、batch_eval.py、online_eval.py、
-            create_custom_evaluators.py、show_results.py
-deploy/     setup_observability.sh（每个账号/区域执行一次）、deploy_ec2.sh、bootstrap.sh、userdata.sh
-tests/test_telemetry.py   离线检查 span 结构是否符合评测要求
-```
 
-## 本地快速上手（连真实 AWS 账号）
+span 和日志都写进 Agent 自己的日志组，所以评测的数据源只需要配这一个日志组，再按 `service.name` 过滤即可。
+
+## 代码结构
+
+| 路径 | 作用 |
+|---|---|
+| [`mini_agent/telemetry.py`](../mini_agent/telemetry.py) | 埋点：三类 GenAI span，scope 为 `opentelemetry.instrumentation.mini_agent`，并从 baggage 取 `session.id` 写到每个 span 上。只依赖 `opentelemetry-api`，没有 ADOT 时这些调用都是空操作 |
+| [`demo/app.py`](app.py)、[`index.html`](index.html) | FastAPI 服务和聊天页面。一个会话对应一个 Agent 实例和一个 `session_id`；包含系统提示和源站校验中间件 |
+| [`demo/mcp_clickhouse.json`](mcp_clickhouse.json) | mcp-clickhouse 0.7.0 的 MCP 配置 |
+| [`demo/seed.sql`](seed.sql)、[`clickhouse.sh`](clickhouse.sh) | 用确定性算法生成的合成数据；Docker 启动 ClickHouse（只监听本机）并灌入数据 |
+| [`demo/run.sh`](run.sh)、[`otel.env.example`](otel.env.example) | 用 `opentelemetry-instrument` 启动服务；自托管 Agent 所需的全部 ADOT 环境变量 |
+| [`eval/`](../eval/) | 评测：数据集 → 标准答案、回放、批量评测、在线评测、自定义 evaluator、结果汇总 |
+| [`deploy/`](../deploy/) | Observability 初始化、EC2 部署、实例启动脚本、清理脚本，以及 [`iam/`](../deploy/iam/) 下的最小权限策略 |
+| [`tests/test_telemetry.py`](../tests/test_telemetry.py) | 离线测试，检查 span 是否符合评测要求：scope、层级、`session.id`、内容属性，以及重试不会产生多余的 chat span |
+
+## 快速开始
+
+**前提**：Docker、[uv](https://docs.astral.sh/uv/)、AWS CLI v2；一个具备[所需权限](#iam-最小权限)的 AWS profile（下文记作 `<profile>`）；Bedrock 中已开通 Claude 模型。
+
+### 1. 安装依赖并做离线自检
 
 ```bash
+git clone -b agentcore-text2sql https://github.com/ensean/Mini-Agent && cd Mini-Agent
 uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[demo,dev]"
-.venv/bin/pytest -q tests/test_telemetry.py                    # 离线检查 span 结构，预期 5 passed
-bash demo/clickhouse.sh                                        # Docker 启动 ClickHouse 并灌入示例数据
-PROFILE=<profile> REGION=ap-northeast-1 bash deploy/setup_observability.sh
-cp demo/otel.env.example demo/otel.env && echo AWS_PROFILE=<profile> >> demo/otel.env
-bash demo/run.sh                                               # http://127.0.0.1:8080
+.venv/bin/pytest -q tests/test_telemetry.py   # 预期：5 passed
+bash demo/clickhouse.sh                       # 预期最后一行：fact_gift_send rows  600000
 ```
 
-首次开启 Transaction Search 可能要等 10–15 分钟才变成 ACTIVE，期间导出 span 会报 400，属于正常现象。
+离线自检不依赖任何 AWS 资源。它通不过，后面评测一定拿不到数据。
 
-## 评测
+### 2. 开启 Observability（每个账号/区域执行一次）
 
 ```bash
-export AWS_PROFILE=<profile> AWS_REGION=ap-northeast-1
-.venv/bin/python eval/create_custom_evaluators.py              # 创建 2 个自定义 LLM judge
-.venv/bin/python eval/replay.py [--base-url https://<cloudfront 域名> --auth agentcore-demo:<密码>]
-.venv/bin/python eval/batch_eval.py eval/out/<run_id>.json     # 等 span 摄取完成后，按标准答案批量打分
-.venv/bin/python eval/show_results.py eval/out/<run_id>.batch.json
-.venv/bin/python eval/online_eval.py                           # 对线上流量持续自动打分
+PROFILE=<profile> REGION=ap-northeast-1 bash deploy/setup_observability.sh
+aws xray get-trace-segment-destination --profile <profile> --region ap-northeast-1
+# 预期最终状态：CloudWatchLogs  ACTIVE
 ```
 
-## 部署到 EC2
+脚本做三件事：开启 CloudWatch Transaction Search，创建 Agent 日志组（含 `runtime-logs` 和 `spans` 两个日志流），添加允许 X-Ray 把 span 写进该日志组的资源策略。
+
+> [!NOTE]
+> 新账号第一次开启时，状态可能要 PENDING 10–15 分钟。这期间 ADOT 导出 span 会报 `400 Bad Request`（"The OTLP API is supported with CloudWatch Logs as a Trace Segment Destination"），日志不受影响。等状态变成 ACTIVE 即可。
+
+### 3. 本地运行，确认 span 已到达
+
+```bash
+cp demo/otel.env.example demo/otel.env && echo "AWS_PROFILE=<profile>" >> demo/otel.env
+bash demo/run.sh &        # http://127.0.0.1:8080
+curl -s 127.0.0.1:8080/api/ask -H 'content-type: application/json' \
+  -d '{"question":"2026 年 9 月的送礼总流水是多少美元？","session_id":"localtest0001"}'
+```
+
+1–2 分钟后，在 CloudWatch Logs Insights 中查询 Agent 日志组：
+
+```sql
+filter `attributes.session.id` = 'localtest0001'
+| fields name, scope.name, attributes.gen_ai.operation.name
+| sort startTimeUnixNano asc
+```
+
+预期能看到 `invoke_agent text2sql-demo`、若干 `chat ...` 和 `execute_tool ...`，scope 都是 `opentelemetry.instrumentation.mini_agent`。
+
+### 4. 部署到 EC2
 
 ```bash
 PROFILE=<profile> REGION=ap-northeast-1 bash deploy/deploy_ec2.sh
-# 取登录密码（用户名 agentcore-demo，首次部署时随机生成）：
-aws ssm get-parameter --name /text2sql-demo/basic-auth --with-decryption \
-  --query Parameter.Value --output text --profile <profile> --region ap-northeast-1
+# 预期输出：URL: https://dxxxx.cloudfront.net/   user: agentcore-demo
+CRED=$(aws ssm get-parameter --name /text2sql-demo/basic-auth --with-decryption \
+         --query Parameter.Value --output text --profile <profile> --region ap-northeast-1)
+curl -s -u "$CRED" https://dxxxx.cloudfront.net/healthz
+# 预期：{"ok":true,"model":"global.anthropic.claude-sonnet-4-6","tools":["list_databases","list_tables","run_query"]}
 ```
 
-访问控制：WAF 按 IP 限速（每 5 分钟 100 个请求）→ CloudFront Function 做 Basic Auth（凭证存在 KeyValueStore）→ 源站只接受 CloudFront 前缀列表的流量，且必须带 `X-Origin-Verify` 头。可以用 `BASIC_PASS`、`RATE_LIMIT` 环境变量覆盖默认值。
+CloudFront 部署需要 5–10 分钟，实例启动约 5 分钟。脚本可以重复执行，已存在的资源只做更新。可以通过环境变量覆盖的参数有：`AGENT_NAME`、`INSTANCE_TYPE`、`BEDROCK_MODEL`、`BASIC_USER`、`BASIC_PASS`、`RATE_LIMIT`、`VPC_ID`、`SUBNET_ID`。
 
-## 接入权限（最小权限）
+### 5. 在看板上验证
 
-策略模板在 [`deploy/iam/`](../deploy/iam/)，其中的 `${REGION}`、`${ACCOUNT_ID}`、`${AGENT_NAME}` 用 `render.sh` 填充：
+依次进入 CloudWatch → GenAI Observability → Bedrock AgentCore → Agents → `text2sql-demo`：
+
+- **OTEL sessions**：每个会话一行，Traces 列等于对话轮数（多轮对话会归到同一个会话下）。
+- **Trace 详情**：可以看到 span 树、每次 chat 的输入输出和 token 用量，以及 `POST /api/ask → invoke_agent → chat` 的调用轨迹。
+- **Overview**：开启在线评测后，顶部会显示各 evaluator 的均分。
+
+## 遥测接入要点
+
+这一节是把同样的接入方式迁移到其他自研 Agent 时需要遵守的约定。
+
+**1. scope 名必须带规定的前缀。** AgentCore Evaluations 只通过 `opentelemetry.instrumentation.*`（OpenTelemetry GenAI 规范）或 `openinference.instrumentation.*`（OpenInference 规范）这两个前缀识别通用框架。其他 scope 名即使属性完全合规，也会被忽略。
+
+```python
+_tracer = trace.get_tracer("opentelemetry.instrumentation.mini_agent", "0.1.0")
+```
+
+**2. 三类 span，以及每类需要的属性**（chat 和 execute_tool 必须是 invoke_agent 的子 span）：
+
+| span | 识别属性 | 评测读取的内容属性 | 埋点位置 |
+|---|---|---|---|
+| `invoke_agent` | `gen_ai.operation.name=invoke_agent` | `gen_ai.task.input`（用户输入）、`gen_ai.task.output`（最终回答） | `Agent.run()` |
+| `chat` | `gen_ai.operation.name=chat` | `gen_ai.input.messages` / `gen_ai.output.messages`、`gen_ai.system_instructions`、`gen_ai.tool.definitions`、`gen_ai.usage.*` | `LLMClient.generate()` |
+| `execute_tool` | `gen_ai.operation.name=execute_tool` | `gen_ai.tool.name`、`gen_ai.tool.call.id`、`gen_ai.tool.call.arguments` / `.result` | 工具调度处 |
+
+消息使用规范的 `{"role", "parts": [...]}` 结构，不要再包一层自定义结构，因为服务端会把内容当作字符串原样读取。重试记成 chat span 上的 event，不要为每次重试单独开一个 chat span。
+
+**3. 每个 span 都带 `session.id`**，否则多轮对话无法归到同一个会话。在请求入口把它放进 OTel baggage，`telemetry.py` 会把它写到每个 span 上：
+
+```python
+token = context.attach(baggage.set_baggage("session.id", session_id))
+try:
+    answer = await agent.run()
+finally:
+    context.detach(token)
+```
+
+**4. 用 ADOT 启动进程**：`opentelemetry-instrument uvicorn ...`，环境变量见 [`otel.env.example`](otel.env.example)。其中几个关键项：
+
+| 变量 | 作用 |
+|---|---|
+| `OTEL_RESOURCE_ATTRIBUTES=service.name=...,aws.log.group.names=...` | `service.name` 是评测时用来过滤的字段；`aws.log.group.names` 决定数据能否出现在 AgentCore 看板上 |
+| `OTEL_EXPORTER_OTLP_LOGS_HEADERS` / `..._TRACES_HEADERS` | 把日志和 span 都写进 Agent 自己的日志组 |
+| `AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true` | 让消息和工具调用的内容保留在 span 上（需要 ADOT 0.18 及以上） |
+| `AGENT_OBSERVABILITY_ENABLED=true`、`OTEL_PYTHON_DISTRO=aws_distro`、`OTEL_PYTHON_CONFIGURATOR=aws_configurator` | 启用 ADOT 的 GenAI 处理流程，并用 SigV4 签名导出到 CloudWatch |
+
+同一个 trace 里还会出现 FastAPI、anthropic SDK（`com.anthropic.sdk.python.bedrock`）和 MCP SDK（`mcp-python-sdk`）自带的 span。它们的 scope 不在评测识别的前缀里，所以不会和我们自己埋的 chat span 重复计算。
+
+## 评测
+
+### 数据集
+
+[`eval/dataset.json`](../eval/dataset.json) 共 12 个场景，每个场景包括：一轮或多轮问题、每轮的参考 SQL、会话级 assertions、期望的工具调用轨迹。[`build_ground_truth.py`](../eval/build_ground_truth.py) 在同一份数据上执行参考 SQL，把结果作为每轮的标准答案，写入 `ground_truth.json`。种子数据是确定性生成的，所以提交到仓库的标准答案在任何新部署上都有效。
+
+场景覆盖：表结构问答、单值聚合、排名、Top N 加关联、占比、相对时间（需要先查最新日期）、容易算错口径的问题（人均按送礼人数算、按 gift_cnt 求和而不是计条数）、多轮指代、拒绝写操作。
+
+### Evaluator
+
+| evaluator | 级别 | 批量 | 在线 | 说明 |
+|---|---|:-:|:-:|---|
+| `Builtin.Correctness` | TRACE | ✓ | | 对照每轮的标准答案 |
+| `Builtin.Helpfulness` | TRACE | ✓ | ✓ | |
+| `Builtin.ResponseRelevance` | TRACE | | ✓ | |
+| `Builtin.InstructionFollowing` | TRACE | ✓ | ✓ | 衡量是否满足**用户这一轮的请求**，不是是否遵守系统提示，所以对应当拒绝的场景会给 0 |
+| `Builtin.GoalSuccessRate` | SESSION | ✓ | ✓ | 批量评测时对照 assertions |
+| `Builtin.TrajectoryInOrderMatch` | SESSION | ✓ | | 期望的工具按顺序出现即可，允许中间穿插其他调用 |
+| `Builtin.ToolSelectionAccuracy` | TOOL_CALL | ✓ | ✓ | |
+| `Builtin.ToolParameterAccuracy` | TOOL_CALL | ✓ | | |
+| `text2sql_answer_accuracy`（自定义） | TRACE | ✓ | | 关键数字和口径是否与参考 SQL 的结果一致（使用 `{expected_response}`） |
+| `text2sql_grounded_answer`（自定义） | TRACE | | ✓ | 不需要标准答案：数字是否都能在 SQL 执行结果中找到依据，回答末尾是否附了 SELECT 语句 |
+
+两个自定义 evaluator 都是 LLM-as-a-judge，评分为 1 / 0.5 / 0，temperature 设为 0。TRACE 级模板可用的占位符有：`{context}`（之前所有轮次，加上本轮问题和工具调用结果）、`{assistant_turn}`（本轮回答）、`{expected_response}`（标准答案）。
+
+### 运行
+
+```bash
+export AWS_PROFILE=<profile> AWS_REGION=ap-northeast-1
+.venv/bin/python eval/create_custom_evaluators.py                     # 创建 2 个自定义 evaluator（可重复执行）
+.venv/bin/python eval/replay.py --base-url https://dxxxx.cloudfront.net --auth "$CRED"
+.venv/bin/python eval/batch_eval.py eval/out/<run_id>.json            # 批量评测
+.venv/bin/python eval/show_results.py eval/out/<run_id>.batch.json --md report.md
+.venv/bin/python eval/online_eval.py                                  # 开启在线评测；--disable 停用
+```
+
+- **`replay.py`**：每个场景对应一个会话，会话 ID 形如 `<run_id>-s09_followup_country`。并发回放全部 12 个场景约 40 个请求，低于 WAF 的限速阈值。
+- **`batch_eval.py`**：对自托管 Agent 来说，`StartBatchEvaluation` 是最省事的离线评测入口。数据源填 Agent 日志组和 `service.name`，用 sessionIds 过滤；每个会话的标准答案（各轮的 expectedResponse、assertions、expectedTrajectory）通过 `evaluationMetadata.sessionMetadata` 一起传入，不需要自己从 CloudWatch 下载 span 再调 Evaluate API。脚本提交前会先等到每个会话的每一轮 span 都能查到，一般需要 1–3 分钟。
+- **`show_results.py`**：读取结果日志组 `/aws/bedrock-agentcore/evaluations/batch-evaluations/results/default`，汇总成"会话 × evaluator"矩阵，并列出所有低于 1 分的条目及 judge 给出的理由。
+- **`online_eval.py`**：在线评测的数据源同样是"日志组 + service.name"。demo 里抽样比例为 100%，会话空闲 5 分钟算结束；生产环境建议抽样 1–10%。结果写入 `/aws/bedrock-agentcore/evaluations/results/<config_id>`，分数同时作为 `Bedrock-AgentCore/Evaluations` 命名空间下的指标，可以直接配置告警。
+
+### 实测结果
+
+12 个会话、15 轮对话、36 次工具调用的批量评测：
+
+| Correctness | answer_accuracy | GoalSuccessRate | Trajectory | ToolParameter | ToolSelection | Helpfulness | InstructionFollowing |
+|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0.97 | 0.98 | 0.93 |
+
+在线评测（28 个会话）：ResponseRelevance 0.99、ToolSelectionAccuracy 0.99、Helpfulness 0.97、grounded_answer 0.92、InstructionFollowing 0.89、GoalSuccessRate 0.86。
+
+> [!TIP]
+> **读分数一定要结合 judge 给出的理由。** 第一轮评测中，s12（"把玫瑰单价改成 2 钻石"）的 InstructionFollowing 是 0：Agent 拒绝执行，但给出了 `ALTER TABLE ... UPDATE` 语句。原因是"回答末尾附上 SQL"这条格式规则和只读规则冲突了，改了系统提示后，回答里不再出现写操作 SQL。但复评时这一项仍然是 0，judge 的理由是"用户要求修改数据，助手拒绝了"。所以拒绝类场景应该用 assertions 加 GoalSuccessRate（本例为 1.0）来衡量，或者专门写一个自定义 evaluator。
+
+## 访问控制
+
+由外到内共三层，均由 `deploy_ec2.sh` 创建：
+
+1. **WAF（us-east-1，scope 为 CLOUDFRONT）**：默认放行，加一条按 IP 的限速规则：5 分钟内超过 `RATE_LIMIT`（默认 100）个请求就拦截。WAF 在 CloudFront Function 之前执行，所以认证失败的请求也会被计数。实测连发 150 个请求，约 25 秒后开始返回 403，速率降下来后自动解除。
+2. **CloudFront Function 做 Basic Auth**：正确的凭证存在 CloudFront KeyValueStore 里，函数代码里没有密码。用户名为 `agentcore-demo`，密码在首次部署时随机生成，存放在 SSM 参数 `/<agent>/basic-auth` 中。页面里的 fetch 是同源请求，浏览器会自动带上凭证；回放脚本用 `replay.py --auth user:pass`。
+3. **源站校验**：安全组只放行 CloudFront origin-facing 前缀列表访问 8080 端口。但这个前缀列表是**所有 CloudFront 分发共用的**，别人用自己的分发也能连到我们的源站。所以我们的分发在回源时会带上 `X-Origin-Verify` 头，app 中间件校验不通过就返回 403。这个密钥存放在 SSM 参数 `/<agent>/origin-verify` 中，实例启动时写进 systemd 配置。
+
+实例上没有对 0.0.0.0/0 开放的端口，管理一律通过 SSM Session Manager。
+
+## IAM 最小权限
+
+策略模板位于 [`deploy/iam/`](../deploy/iam/)，用 `render.sh` 填入 region、账号和 Agent 名：
 
 ```bash
 REGION=ap-northeast-1 ACCOUNT_ID=123456789012 AGENT_NAME=text2sql-demo \
   bash deploy/iam/render.sh observability-evaluation-policy.json > /tmp/policy.json
 ```
 
-一共涉及两类身份：**执行脚本的身份**（你本地 AWS profile 对应的用户或角色）和 **Agent 运行身份**（Agent 进程使用的凭证，本 demo 中是 EC2 实例角色）。
-
-| 场景 | 执行脚本的身份 | Agent 运行身份 |
+| 场景 | 执行脚本的身份（本地 profile） | Agent 运行身份 |
 |---|---|---|
-| A. 仅接入 AgentCore Observability + Evaluations（Agent 已部署在自己的环境） | `observability-evaluation-policy.json` | `agent-runtime-policy.json` |
-| B. 部署本 demo + 接入 | `observability-evaluation-policy.json` + `demo-deploy-policy.json` | 由 `deploy_ec2.sh` 自动创建（`${AGENT_NAME}-ec2` 角色），无需手动配置 |
+| **A. 仅接入 Observability + Evaluations**（Agent 已部署在自己的环境中） | [`observability-evaluation-policy.json`](../deploy/iam/observability-evaluation-policy.json) | [`agent-runtime-policy.json`](../deploy/iam/agent-runtime-policy.json) |
+| **B. 部署本 demo + 接入** | 上一份，再加 [`demo-deploy-policy.json`](../deploy/iam/demo-deploy-policy.json) | 由 `deploy_ec2.sh` 创建（`<agent>-ec2` 角色），不需要手动配置 |
 
-以上策略已在 2026-11 用一个只挂这些策略的测试角色实测：完整跑通了从零部署 → 再次部署（更新路径）→ 回放 → 批量评测（含自定义 judge）→ 创建和停用在线评测。
+这几份策略已经用一个只挂了它们的测试角色完整验证过：从零部署、再次部署（更新路径）、回放、批量评测（含自定义 judge）、创建和停用在线评测。托管在 AgentCore Runtime 上的 Agent 不需要 `agent-runtime-policy`，直接用 Runtime 的执行角色即可。`teardown.sh` 需要 Delete 类权限，不在这个最小集合里，建议用管理员身份执行。
 
-### 场景 A：仅接入 Observability + Evaluations
+<details>
+<summary><b>observability-evaluation-policy</b>：setup_observability.sh 与 eval/*.py</summary>
 
-**执行脚本的身份**（`observability-evaluation-policy.json`），覆盖 `setup_observability.sh` 和 `eval/*.py`：
-
-| 用途 | 主要权限 | 资源范围 |
+| 用途 | 权限 | 资源 |
 |---|---|---|
-| 开启 Transaction Search（账号级，只需一次） | `xray:Get/UpdateTraceSegmentDestination`、`xray:Get/UpdateIndexingRule(s)`、`logs:PutResourcePolicy` | `*`（账号级 API） |
-| Agent 日志组：创建、设置保留期，以及 batch_eval 等待 span 时的查询 | `logs:CreateLogGroup/PutRetentionPolicy/CreateLogStream/StartQuery`、`logs:Describe/PutIndexPolicy` | `/aws/bedrock-agentcore/runtimes/${AGENT_NAME}` |
+| Transaction Search（账号级） | `xray:Get/UpdateTraceSegmentDestination`、`xray:Get/UpdateIndexingRule(s)`、`logs:PutResourcePolicy` | `*` |
+| Agent 日志组（创建，以及评测前查询 span 是否到齐） | `logs:CreateLogGroup/PutRetentionPolicy/CreateLogStream/StartQuery`、`logs:Describe/PutIndexPolicy` | `/aws/bedrock-agentcore/runtimes/<agent>` |
 | 评测结果日志组 | `logs:CreateLogGroup/PutRetentionPolicy/CreateLogStream/PutLogEvents/FilterLogEvents` | `/aws/bedrock-agentcore/evaluations/*` |
-| 自定义 evaluator、批量评测、在线评测 | `bedrock-agentcore:*Evaluator*`、`*BatchEvaluation*`、`*OnlineEvaluationConfig*` | `*` |
-| 自定义 LLM judge 调用模型 | `bedrock:InvokeModel` | Claude 推理配置 / 基础模型 |
-| 在线评测的执行角色 | `iam:Get/CreateRole`、`UpdateAssumeRolePolicy`、`PutRolePolicy`，以及带 `iam:PassedToService=bedrock-agentcore` 条件的 `iam:PassRole` | 仅 `AgentCoreEvaluationRole-${AGENT_NAME}` |
+| Evaluator、批量评测、在线评测 | `bedrock-agentcore:*Evaluator*`、`*BatchEvaluation*`、`*OnlineEvaluationConfig*` | `*` |
+| 自定义 judge 调用模型 | `bedrock:InvokeModel` | Claude |
+| 在线评测的执行角色 | `iam:Get/CreateRole`、`UpdateAssumeRolePolicy`、`PutRolePolicy`，以及限定只能传给 bedrock-agentcore 的 `iam:PassRole` | 仅 `AgentCoreEvaluationRole-<agent>` |
 
-**Agent 运行身份**（`agent-runtime-policy.json`）：
+</details>
+
+<details>
+<summary><b>agent-runtime-policy</b>：Agent 进程</summary>
 
 | 用途 | 权限 |
 |---|---|
-| Agent 调用模型 | `bedrock:InvokeModel`（Claude） |
-| ADOT 导出 trace（OTLP → X-Ray 端点） | `xray:PutTraceSegments`、`PutTelemetryRecords`、`GetSampling*`（与托管策略 `AWSXrayWriteOnlyAccess` 相同） |
-| ADOT 导出日志和 EMF 指标（OTLP → Logs 端点） | `logs:PutLogEvents/CreateLogStream/DescribeLogStreams/DescribeLogGroups`，仅限 Agent 日志组 |
+| 调用模型 | `bedrock:InvokeModel`（Claude） |
+| ADOT 导出 trace | `xray:PutTraceSegments`、`PutTelemetryRecords`、`GetSampling*`，与托管策略 `AWSXrayWriteOnlyAccess` 相同 |
+| ADOT 导出日志和 EMF 指标 | `logs:PutLogEvents/CreateLogStream/DescribeLogStreams/DescribeLogGroups`，仅限 Agent 日志组 |
 
-托管在 AgentCore Runtime 上的 Agent 不需要这份策略，用 Runtime 自己的执行角色即可。
+</details>
 
-### 场景 B：部署本 demo + 接入
+<details>
+<summary><b>demo-deploy-policy</b>：deploy_ec2.sh</summary>
 
-在场景 A 的基础上，执行脚本的身份再加上 `demo-deploy-policy.json`（覆盖 `deploy_ec2.sh`）：
-
-| 用途 | 主要权限 | 资源范围 / 条件 |
+| 用途 | 权限 | 资源 / 条件 |
 |---|---|---|
-| 实例角色和实例配置文件 | `iam:Get/CreateRole`、`TagRole`、`PutRolePolicy`、`AttachRolePolicy`、`*InstanceProfile`、`iam:PassRole` | 仅 `${AGENT_NAME}-ec2`；`AttachRolePolicy` 只允许挂 SSM Core 和 X-Ray 写入两个托管策略；`PassRole` 只能传给 ec2 |
-| 安全组和 EC2 实例 | `ec2:Describe*`（5 个）、`CreateSecurityGroup`、`AuthorizeSecurityGroupIngress`、`RunInstances`、`CreateTags` | 写操作限定在 `${REGION}` |
-| AMI 查询、密钥存储 | `ssm:GetParameter`（AMI 公共参数）、`ssm:Get/PutParameter`、`AddTagsToResource` | `/aws/service/ami-amazon-linux-latest/*`、`/${AGENT_NAME}/*` |
-| CloudFront 分发、函数、KeyValueStore | `cloudfront:*Distribution*`、`*Function`、`*KeyValueStore`、`cloudfront-keyvaluestore:DescribeKeyValueStore/PutKey` | `*` |
-| WAF | `wafv2:List/Get/Create/UpdateWebACL`、`TagResource` | `*`（Web ACL 建在 us-east-1） |
-| 在实例上执行命令（更新代码、看日志） | `ssm:SendCommand/GetCommandInvocation/StartSession` | `*` |
+| 实例角色和实例配置文件 | `iam:Get/CreateRole`、`TagRole`、`PutRolePolicy`、`AttachRolePolicy`、`*InstanceProfile`、`iam:PassRole` | 仅 `<agent>-ec2`；`AttachRolePolicy` 只允许挂 SSM Core 和 X-Ray 写入两个托管策略；`PassRole` 只能传给 ec2 |
+| 安全组和 EC2 | `ec2:Describe*`（5 个）、`CreateSecurityGroup`、`AuthorizeSecurityGroupIngress`、`RunInstances`、`CreateTags` | 写操作限定在当前 region |
+| AMI 查询、密钥存储 | `ssm:GetParameter`、`PutParameter`、`AddTagsToResource` | AMI 公共参数、`/<agent>/*` |
+| CloudFront、KeyValueStore | `cloudfront:*Distribution*`、`*Function`、`*KeyValueStore`、`cloudfront-keyvaluestore:DescribeKeyValueStore/PutKey` | `*` |
+| WAF | `wafv2:List/Get/Create/UpdateWebACL`、`TagResource` | `*` |
+| 在实例上执行命令 | `ssm:SendCommand/GetCommandInvocation/StartSession` | `*` |
 
-`teardown.sh` 需要对应的 Delete 权限，不在上面的最小集合里，建议用管理员身份执行。
+</details>
 
-### 文档没写清楚、实测才发现的几点
+> [!IMPORTANT]
+> `StartBatchEvaluation` 用的是**调用者自己的凭证**（FAS）去建结果日志组、查询 span、调用自定义 judge 的模型。所以执行脚本的身份需要评测结果日志组的写权限，以及 judge 模型的 `bedrock:InvokeModel`，否则会报 `FAS credentials do not have permission to ...`。内置 evaluator 由服务端调用模型，不需要这项权限。
 
-- **StartBatchEvaluation 用的是调用者自己的凭证**（FAS）去建结果日志组、查询 span、调用自定义 judge 模型，所以执行脚本的身份需要评测结果日志组的写权限和 judge 模型的 `bedrock:InvokeModel`，否则会报 `FAS credentials do not have permission to ...`。内置 evaluator 由服务端调用模型，不需要这个权限。
-- **在线评测的执行角色刚创建时**，可能因为 IAM 还没传播完，创建配置会报 "execution role does not have permissions to access the specified log groups"。`online_eval.py` 已经内置了重试。
-- 如果 span 写到共享的 `aws/spans` 日志组（没有设置 `OTEL_EXPORTER_OTLP_TRACES_HEADERS`），需要把 `aws/spans` 也加进 `AgentLogGroup` 这条语句的资源范围，并在评测数据源里同时配置两个日志组。
+## 常见问题
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| ADOT 报 `Failed to export spans batch code: 400` | Transaction Search 仍是 PENDING | 等到 ACTIVE，新账号约需 15 分钟 |
+| 批量评测报 "No spans were found for the session" | span 还没摄取完就提交了 | `batch_eval.py` 已内置等待逻辑；自己调 API 时，先用 Logs Insights 确认 span 已到达 |
+| 多轮会话少评了最后一轮 | 只等到"会话出现"就提交了 | 要等每个会话的 `invoke_agent` 数量和轮数一致（脚本已处理） |
+| 创建在线评测时报 "execution role does not have permissions to access the specified log groups" | ① 执行角色刚创建，IAM 还没传播完；② 按官方文档写的信任策略 `aws:SourceArn` 条件过窄 | ① `online_eval.py` 会自动重试；② 条件改为 `arn:aws:bedrock-agentcore:<region>:<account>:*` |
+| TrajectoryInOrderMatch 报 "Expected trajectory not provided" | 期望轨迹是空列表（拒绝类场景本来就不应调用工具） | 服务端行为，可以忽略，或改用 assertions 表达 |
+| TOOL_CALL 级 evaluator 的 totalFailed 为 1 | 该会话没有任何工具调用，没有可评对象 | 正常现象 |
+| 实例首次启动时报 "no MCP tools loaded" | `uvx` 冷启动下载 mcp-clickhouse 超过了 Mini-Agent 默认的 10 秒连接超时 | `mcp_clickhouse.json` 中已设置 `connect_timeout: 60` |
+| trace 的根节点是 `POST /api/ask` 而不是 `invoke_agent` | 新版 FastAPI 自带 OTel span，无法通过 `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` 关闭 | 不影响评测 |
+| MCP 子进程会不会也上报 span | 不会。mcp SDK 启动 stdio 子进程时，只继承 PATH、HOME 等少量变量，不继承 `PYTHONPATH` 和 `OTEL_*` | 无需处理 |
 
 ## 清理
 
 ```bash
-CONFIRM=yes PROFILE=<profile> REGION=ap-northeast-1 bash deploy/teardown.sh   # 约 15 分钟，CloudFront 需要先停用
+# 只是暂停：停用在线评测，并停掉实例
+.venv/bin/python eval/online_eval.py --disable
+aws ec2 stop-instances --instance-ids <IID> --profile <profile> --region ap-northeast-1
+
+# 全部删除（约 15 分钟）
+CONFIRM=yes PROFILE=<profile> REGION=ap-northeast-1 bash deploy/teardown.sh
 ```
 
-会删除分发、函数、KVS、WAF、EC2、安全组、IAM 角色、SSM 参数、日志组和在线评测配置。不会关闭账号级的 Transaction Search；自定义 evaluator 默认保留，加 `DELETE_EVALUATORS=yes` 才会一起删。
+`teardown.sh` 会删除 CloudFront 分发（先停用再删除）、函数、KeyValueStore、WAF、EC2、安全组、IAM 角色、SSM 参数、日志组和在线评测配置。账号级的 Transaction Search 不会关闭；两个自定义 evaluator 默认保留，加上 `DELETE_EVALUATORS=yes` 会一并删除。
 
-## 文档
+常驻成本主要包括：1 台 t3.large、WAF（每个 Web ACL 约 $5/月，每条规则 $1/月，另按请求计费）、日志存储（保留 30 天），以及在线评测（抽样 100% 时，每个会话都会触发多次 judge 调用）。
 
-- 分步实操指引（含实测输出、截图和踩坑记录）：https://qi1g2b1825p.feishu.cn/docx/STTRdgXpVotpXPxJRt4cwUh3nnd
-- 自研 Agent 埋点接入 AgentCore 的通用原理：https://qi1g2b1825p.feishu.cn/docx/Q7BJdraIpov4Jkxk2G9c26S6nPf
+## 扩展方向
+
+- **代码评估器（SQL 执行结果比对）**：LLM judge 比较的是回答里的数字，更客观的做法是直接比较 SQL 的执行结果。可以写一个 Lambda，从 `execute_tool`（`run_query`）span 中取出 Agent 最后执行的 SQL，与参考 SQL 分别执行，按"与列名、行序无关，数值允许误差"的规则比较结果集，然后返回 score、label 和 explanation。Lambda 应使用只读账号，并拒绝非 SELECT 语句。用 `create-evaluator --level TRACE --evaluator-config '{"codeBased":{"lambdaConfig":{"lambdaArn":"..."}}}'` 注册，Lambda 的入参和返回格式以官方 code-based evaluator 文档为准。
+- **CI 门禁**：在 PR 上回放数据集并执行 `batch_eval.py`，任一 evaluator 的均分低于阈值就让构建失败。
+- **告警**：对 `Bedrock-AgentCore/Evaluations` 命名空间下的指标（按 service.name 和 evaluator 维度）配置 CloudWatch 告警。
+- **改为托管在 AgentCore Runtime 上**：只需安装 ADOT 并用 `opentelemetry-instrument` 启动。日志组、环境变量和 `session.id`（来自请求头）都由 Runtime 注入，评测可以直接按 agent_id 执行。
+
+## 参考
+
+- [Generic framework support](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/supported-frameworks-generic.html)：自研框架需要的 scope、属性及读取顺序
+- [Observability for agents hosted outside of AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html)
+- [Evaluations prerequisites](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/evaluations-prerequisites.html)
+- [内置 evaluator 的 prompt 模板与占位符](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/prompt-templates-builtin.html)
