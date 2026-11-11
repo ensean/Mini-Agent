@@ -35,9 +35,11 @@ def ground_truth(sc: dict) -> dict:
     return {"inline": gt}
 
 
-def wait_for_spans(session_ids: list[str], t0: datetime, timeout_s: int = 600) -> None:
-    """Block until every session has an invoke_agent span queryable in the agent log group.
-    Ingestion usually takes 1-3 minutes; evaluating earlier fails with 'No spans were found'."""
+def wait_for_spans(expected_turns: dict[str, int], t0: datetime, timeout_s: int = 600) -> None:
+    """Block until every session has all its invoke_agent spans (one per turn) queryable in the
+    agent log group. Ingestion usually takes 1-3 minutes; evaluating earlier fails with
+    'No spans were found', or silently skips the turns that have not landed yet."""
+    session_ids = list(expected_turns)
     logs = session().client("logs")
     ids = ", ".join(f"'{s}'" for s in session_ids)
     q = (f"filter `attributes.gen_ai.operation.name` = 'invoke_agent' and `attributes.session.id` in [{ids}]"
@@ -48,12 +50,14 @@ def wait_for_spans(session_ids: list[str], t0: datetime, timeout_s: int = 600) -
                                endTime=int(time.time()) + 60, queryString=q)["queryId"]
         while (res := logs.get_query_results(queryId=qid))["status"] in ("Scheduled", "Running"):
             time.sleep(2)
-        found = {f["value"] for row in res["results"] for f in row if f["field"] == "attributes.session.id"}
-        print(f"  spans visible for {len(found)}/{len(session_ids)} sessions")
-        if found >= set(session_ids):
+        seen = {r["attributes.session.id"]: int(r["turns"]) for r in
+                ({f["field"]: f["value"] for f in row} for row in res["results"])}
+        missing = sorted(s for s, n in expected_turns.items() if seen.get(s, 0) < n)
+        print(f"  all turns visible for {len(session_ids) - len(missing)}/{len(session_ids)} sessions")
+        if not missing:
             return
         if time.time() > deadline:
-            raise SystemExit(f"spans still missing for {sorted(set(session_ids) - found)}")
+            raise SystemExit(f"spans still missing for {missing}")
         time.sleep(20)
 
 
@@ -67,7 +71,7 @@ def main(run_file: str):
     ac = session().client("bedrock-agentcore")
     t0 = datetime.fromtimestamp(run["started_at"], timezone.utc) - timedelta(minutes=5)
     t1 = datetime.fromtimestamp(run["ended_at"], timezone.utc) + timedelta(minutes=10)
-    wait_for_spans([s["session_id"] for s in sessions], t0)
+    wait_for_spans({s["session_id"]: len(s["turns"]) for s in sessions}, t0)
     r = ac.start_batch_evaluation(
         batchEvaluationName=f"t2s_{run['run_id']}_{time.strftime('%H%M%S')}",
         evaluators=[{"evaluatorId": e} for e in evaluators],
