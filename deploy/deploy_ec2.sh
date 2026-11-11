@@ -5,7 +5,8 @@
 #
 # Network posture: the instance SG has NO 0.0.0.0/0 ingress - only port 8080 from the
 # CloudFront origin-facing managed prefix list. Admin access is via SSM Session Manager.
-# A CloudFront Function restricts viewers to ALLOW_CIDRS (default: your current public IP).
+# An AWS WAF web ACL (us-east-1, scope CLOUDFRONT) with an IP set allows only ALLOW_CIDRS
+# (default: your current public IP); everything else gets 403. Edit the IP set to change it.
 set -euo pipefail
 PROFILE="${PROFILE:-default}"
 REGION="${REGION:-ap-northeast-1}"
@@ -89,38 +90,36 @@ aws ec2 wait instance-running --instance-ids "$IID"
 DNS=$(aws ec2 describe-instances --instance-ids "$IID" --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
 echo "IID=$IID DNS=$DNS"
 
-echo "== 4/5 CloudFront Function: viewer IP allowlist ($ALLOW_CIDRS)"
-CIDRS_JS=$(printf '"%s",' ${ALLOW_CIDRS//,/ }); CIDRS_JS="[${CIDRS_JS%,}]"
-cat >"$TMP/fn.js" <<JS
-var CIDRS = $CIDRS_JS;
-function ip2int(ip) { var p = ip.split('.'); return ((+p[0] << 24) >>> 0) + (+p[1] << 16) + (+p[2] << 8) + (+p[3]); }
-function allowed(ip) {
-  if (!ip || ip.indexOf(':') !== -1) return false;
-  for (var i = 0; i < CIDRS.length; i++) {
-    var c = CIDRS[i].split('/'), bits = +(c[1] || 32);
-    var mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-    if (((ip2int(ip) & mask) >>> 0) === ((ip2int(c[0]) & mask) >>> 0)) return true;
-  }
-  return false;
-}
-function handler(event) {
-  if (allowed(event.viewer.ip)) return event.request;
-  return { statusCode: 403, statusDescription: 'Forbidden',
-           headers: { 'content-type': { value: 'text/plain' } }, body: 'Forbidden: viewer IP not in allowlist' };
-}
-JS
-FN="$NAME-viewer-ip-allowlist"
-if ! cf describe-function --name "$FN" >/dev/null 2>&1; then
-  cf create-function --name "$FN" --function-config 'Comment=viewer IP allowlist,Runtime=cloudfront-js-2.0' \
-    --function-code "fileb://$TMP/fn.js" >/dev/null
+echo "== 4/5 WAF (us-east-1, scope CLOUDFRONT): IP set $ALLOW_CIDRS, default Block"
+waf() { command aws --profile "$PROFILE" --region us-east-1 wafv2 "$@"; }
+IPSET_NAME="$NAME-viewer-allowlist"; ACL_NAME="$NAME-acl"
+read -r -a ADDRS <<< "${ALLOW_CIDRS//,/ }"
+IPSET_ID=$(waf list-ip-sets --scope CLOUDFRONT --query "IPSets[?Name=='$IPSET_NAME'].Id | [0]" --output text)
+if [[ "$IPSET_ID" == "None" || -z "$IPSET_ID" ]]; then
+  IPSET_ARN=$(waf create-ip-set --scope CLOUDFRONT --name "$IPSET_NAME" --ip-address-version IPV4 \
+    --addresses "${ADDRS[@]}" --description "viewer IPs allowed to reach $NAME" \
+    --tags "Key=project,Value=$NAME" --query Summary.ARN --output text)
 else
-  ETAG=$(cf describe-function --name "$FN" --query ETag --output text)
-  cf update-function --name "$FN" --if-match "$ETAG" --function-config 'Comment=viewer IP allowlist,Runtime=cloudfront-js-2.0' \
-    --function-code "fileb://$TMP/fn.js" >/dev/null
+  LOCK=$(waf get-ip-set --scope CLOUDFRONT --name "$IPSET_NAME" --id "$IPSET_ID" --query LockToken --output text)
+  waf update-ip-set --scope CLOUDFRONT --name "$IPSET_NAME" --id "$IPSET_ID" --lock-token "$LOCK" \
+    --addresses "${ADDRS[@]}" >/dev/null
+  IPSET_ARN=$(waf get-ip-set --scope CLOUDFRONT --name "$IPSET_NAME" --id "$IPSET_ID" --query IPSet.ARN --output text)
 fi
-ETAG=$(cf describe-function --name "$FN" --query ETag --output text)
-cf publish-function --name "$FN" --if-match "$ETAG" >/dev/null
-FN_ARN=$(cf describe-function --name "$FN" --stage LIVE --query FunctionSummary.FunctionMetadata.FunctionARN --output text)
+ACL_ARN=$(waf list-web-acls --scope CLOUDFRONT --query "WebACLs[?Name=='$ACL_NAME'].ARN | [0]" --output text)
+if [[ "$ACL_ARN" == "None" || -z "$ACL_ARN" ]]; then
+  cat >"$TMP/rules.json" <<JSON
+[{"Name": "allow-viewer-ips", "Priority": 0,
+  "Statement": {"IPSetReferenceStatement": {"ARN": "$IPSET_ARN"}},
+  "Action": {"Allow": {}},
+  "VisibilityConfig": {"SampledRequestsEnabled": true, "CloudWatchMetricsEnabled": true, "MetricName": "allow-viewer-ips"}}]
+JSON
+  ACL_ARN=$(waf create-web-acl --scope CLOUDFRONT --name "$ACL_NAME" --default-action Block={} \
+    --rules "file://$TMP/rules.json" --description "$NAME: only allow-listed viewer IPs" \
+    --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName="$ACL_NAME" \
+    --tags "Key=project,Value=$NAME" --query Summary.ARN --output text)
+fi
+echo "IPSET=$IPSET_ARN"
+echo "ACL=$ACL_ARN"
 
 echo "== 5/5 CloudFront distribution"
 DIST=$(cf list-distributions --query "DistributionList.Items[?Comment=='$NAME'].Id | [0]" --output text)
@@ -139,11 +138,29 @@ if [[ "$DIST" == "None" || -z "$DIST" ]]; then
                        "CachedMethods": {"Quantity": 2, "Items": ["GET","HEAD"]}},
     "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
     "OriginRequestPolicyId": "b689b0a8-53d0-40ab-baf2-68738e2966ac",
-    "FunctionAssociations": {"Quantity": 1, "Items": [{"EventType": "viewer-request", "FunctionARN": "$FN_ARN"}]}
-  }
+    "FunctionAssociations": {"Quantity": 0}
+  },
+  "WebACLId": "$ACL_ARN"
 }
 JSON
   DIST=$(cf create-distribution --distribution-config "file://$TMP/dist.json" --query Distribution.Id --output text)
+else
+  # existing distribution: make sure the Web ACL is attached (and no viewer-request function)
+  cf get-distribution-config --id "$DIST" >"$TMP/cur.json"
+  ETAG=$(python3 -c "import json;print(json.load(open('$TMP/cur.json'))['ETag'])")
+  if python3 - "$TMP/cur.json" "$ACL_ARN" "$TMP/new.json" <<'EOF'
+import json, sys
+cfg = json.load(open(sys.argv[1]))["DistributionConfig"]
+changed = cfg.get("WebACLId") != sys.argv[2] or cfg["DefaultCacheBehavior"]["FunctionAssociations"]["Quantity"]
+cfg["WebACLId"] = sys.argv[2]
+cfg["DefaultCacheBehavior"]["FunctionAssociations"] = {"Quantity": 0}
+json.dump(cfg, open(sys.argv[3], "w"))
+sys.exit(0 if changed else 1)
+EOF
+  then
+    cf update-distribution --id "$DIST" --if-match "$ETAG" --distribution-config "file://$TMP/new.json" >/dev/null
+    echo "attached $ACL_ARN to $DIST"
+  fi
 fi
 DOMAIN=$(cf get-distribution --id "$DIST" --query Distribution.DomainName --output text)
 echo
