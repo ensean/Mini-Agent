@@ -16,7 +16,6 @@
 - [评测](#评测)
 - [集成到现有平台](#集成到现有平台)
 - [访问控制](#访问控制)
-- [IAM 最小权限](#iam-最小权限)
 - [常见问题](#常见问题)
 - [清理](#清理)
 - [扩展方向](#扩展方向)
@@ -44,9 +43,90 @@ span 和日志都写进 Agent 自己的日志组，所以评测的数据源只�
 
 ## 快速开始
 
-**前提**：Docker、[uv](https://docs.astral.sh/uv/)、AWS CLI v2；一个具备[所需权限](#iam-最小权限)的 AWS profile（下文记作 `<profile>`）；Bedrock 中已开通 Claude 模型。
+**前提**：Docker、[uv](https://docs.astral.sh/uv/)、AWS CLI v2；一个 AWS profile，按[第 1 步](#1-iam-最小权限)挂好权限（下文记作 `<profile>`）；Bedrock 中已开通 Claude 模型。
 
-### 1. 安装依赖并做离线自检
+### 1. IAM 最小权限
+
+先按使用场景给本地 profile（以及 Agent 的运行身份）挂上对应的策略。策略模板位于 [`deploy/iam/`](../deploy/iam/)，用 `render.sh` 填入 region、账号和 Agent 名：
+
+```bash
+REGION=ap-northeast-1 ACCOUNT_ID=123456789012 AGENT_NAME=text2sql-demo \
+  bash deploy/iam/render.sh observability-evaluation-policy.json > /tmp/policy.json
+```
+
+| 场景 | 执行脚本的身份（本地 profile） | Agent 运行身份 |
+|---|---|---|
+| **A. 仅接入 Observability + Evaluations**（Agent 已部署在自己的环境中） | [`observability-evaluation-policy.json`](../deploy/iam/observability-evaluation-policy.json) | [`agent-runtime-policy.json`](../deploy/iam/agent-runtime-policy.json) |
+| **B. 部署本 demo + 接入** | 上一份，再加 [`demo-deploy-policy.json`](../deploy/iam/demo-deploy-policy.json) | 由 `deploy_ec2.sh` 创建（`<agent>-ec2` 角色），不需要手动配置 |
+| **C. 只在 console 看效果**（不跑脚本、不改配置） | [`console-viewer-policy.json`](../deploy/iam/console-viewer-policy.json) | — |
+
+A、B 两套策略已经用一个只挂了它们的测试角色完整验证过：从零部署、再次部署（更新路径）、回放、批量评测（含自定义 judge）、创建和停用在线评测。托管在 AgentCore Runtime 上的 Agent 不需要 `agent-runtime-policy`，直接用 Runtime 的执行角色即可。`teardown.sh` 需要 Delete 类权限，不在这个最小集合里，建议用管理员身份执行。
+
+C 是用只挂这份策略的角色登录 console 逐页验证出来的，验证范围包括：GenAI Observability 总览，Agent 的 Overview / Evaluations / OTEL sessions / Traces / Spans 各页，会话详情，trace 详情（span 树、消息内容、token 成本），以及 AgentCore 控制台的在线评测配置、evaluator 详情、批量评测列表和结果页。
+
+<details>
+<summary><b>observability-evaluation-policy</b>：setup_observability.sh 与 eval/*.py</summary>
+
+| 用途 | 权限 | 资源 |
+|---|---|---|
+| Transaction Search（账号级） | `xray:Get/UpdateTraceSegmentDestination`、`xray:Get/UpdateIndexingRule(s)`、`logs:PutResourcePolicy` | `*` |
+| Agent 日志组（创建，以及评测前查询 span 是否到齐） | `logs:CreateLogGroup/PutRetentionPolicy/CreateLogStream/StartQuery`、`logs:Describe/PutIndexPolicy` | `/aws/bedrock-agentcore/runtimes/<agent>` |
+| 评测结果日志组 | `logs:CreateLogGroup/PutRetentionPolicy/CreateLogStream/PutLogEvents/FilterLogEvents` | `/aws/bedrock-agentcore/evaluations/*` |
+| Evaluator、批量评测、在线评测 | `bedrock-agentcore:*Evaluator*`、`*BatchEvaluation*`、`*OnlineEvaluationConfig*` | `*` |
+| 自定义 judge 调用模型 | `bedrock:InvokeModel` | Claude |
+| 在线评测的执行角色 | `iam:Get/CreateRole`、`UpdateAssumeRolePolicy`、`PutRolePolicy`，以及限定只能传给 bedrock-agentcore 的 `iam:PassRole` | 仅 `AgentCoreEvaluationRole-<agent>` |
+
+</details>
+
+<details>
+<summary><b>agent-runtime-policy</b>：Agent 进程</summary>
+
+| 用途 | 权限 |
+|---|---|
+| 调用模型 | `bedrock:InvokeModel`（Claude） |
+| ADOT 导出 trace | `xray:PutTraceSegments`、`PutTelemetryRecords`、`GetSampling*`，与托管策略 `AWSXrayWriteOnlyAccess` 相同 |
+| ADOT 导出日志和 EMF 指标 | `logs:PutLogEvents/CreateLogStream/DescribeLogStreams/DescribeLogGroups`，仅限 Agent 日志组 |
+
+</details>
+
+<details>
+<summary><b>demo-deploy-policy</b>：deploy_ec2.sh</summary>
+
+| 用途 | 权限 | 资源 / 条件 |
+|---|---|---|
+| 实例角色和实例配置文件 | `iam:Get/CreateRole`、`TagRole`、`PutRolePolicy`、`AttachRolePolicy`、`*InstanceProfile`、`iam:PassRole` | 仅 `<agent>-ec2`；`AttachRolePolicy` 只允许挂 SSM Core 和 X-Ray 写入两个托管策略；`PassRole` 只能传给 ec2 |
+| 安全组和 EC2 | `ec2:Describe*`（5 个）、`CreateSecurityGroup`、`AuthorizeSecurityGroupIngress`、`RunInstances`、`CreateTags` | 写操作限定在当前 region |
+| AMI 查询、密钥存储 | `ssm:GetParameter`、`PutParameter`、`AddTagsToResource` | AMI 公共参数、`/<agent>/*` |
+| CloudFront、KeyValueStore | `cloudfront:*Distribution*`、`*Function`、`*KeyValueStore`、`cloudfront-keyvaluestore:DescribeKeyValueStore/PutKey` | `*` |
+| WAF | `wafv2:List/Get/Create/UpdateWebACL`、`TagResource` | `*` |
+| 在实例上执行命令 | `ssm:SendCommand/GetCommandInvocation/StartSession` | `*` |
+
+</details>
+
+<details>
+<summary><b>console-viewer-policy</b>：只读看板</summary>
+
+GenAI Observability 看板几乎所有数据都来自 Logs Insights 查询（span、会话、评测分数都是），不调用 bedrock-agentcore 的数据面 API。
+
+| 用途 | 权限 | 资源 |
+|---|---|---|
+| 看板查询 span、会话和评测结果 | `logs:StartQuery` | Agent 日志组、`/aws/bedrock-agentcore/evaluations/*`、`aws/spans` |
+| 批量评测结果页 | `logs:FilterLogEvents` | `/aws/bedrock-agentcore/evaluations/*` |
+| 取查询结果、列日志组 | `logs:GetQueryResults/StopQuery/DescribeLogGroups/DescribeMetricFilters` | `*`（这几个 API 不支持按日志组限定） |
+| 指标、告警和 trace 元信息 | `cloudwatch:GetMetricData/ListMetrics/DescribeAlarms/GetOTelEnrichment`、`xray:GetTraceSegmentDestination`、`oam:ListSinks` | `*` |
+| token 成本列 | `pricing:GetProducts`、`bedrock:ListFoundationModels/ListInferenceProfiles` | `*`。去掉后成本一栏显示为 "-"，其他不受影响 |
+| 评测配置和 evaluator 详情 | `bedrock-agentcore:List/Get` 下的 OnlineEvaluationConfig、Evaluator、BatchEvaluation，以及 `ListTagsForResource` | `*` |
+
+`logs:StartQuery` 按日志组限定后，看板使用的全账号查询（`SOURCE logGroups()`）不会报错，只会返回有权限的日志组里的数据。所以想让某个人只看到某个 Agent 的数据，限定 Agent 日志组即可；评测结果日志组按评测配置 ID 命名，需要的话也可以收窄到 `results/<config_id>`。
+
+剩下几个被拒绝的调用都来自 console 外框：账号菜单、通知中心、跨账号提示条（`account:GetAccountInformation`、`notifications:*`、`iam:GetRole`、`applicationinsights:ListProblems`、`freetier:*`、`uxc:*`、`ec2:DescribeRegions`），不影响看板数据，不需要授予。
+
+</details>
+
+> [!IMPORTANT]
+> `StartBatchEvaluation` 用的是**调用者自己的凭证**（FAS）去建结果日志组、查询 span、调用自定义 judge 的模型。所以执行脚本的身份需要评测结果日志组的写权限，以及 judge 模型的 `bedrock:InvokeModel`，否则会报 `FAS credentials do not have permission to ...`。内置 evaluator 由服务端调用模型，不需要这项权限。
+
+### 2. 安装依赖并做离线自检
 
 ```bash
 git clone -b agentcore-text2sql https://github.com/ensean/Mini-Agent && cd Mini-Agent
@@ -57,7 +137,7 @@ bash demo/clickhouse.sh                       # 预期最后一行：fact_gift_s
 
 离线自检不依赖任何 AWS 资源。它通不过，后面评测一定拿不到数据。
 
-### 2. 开启 Observability（每个账号/区域执行一次）
+### 3. 开启 Observability（每个账号/区域执行一次）
 
 ```bash
 PROFILE=<profile> REGION=ap-northeast-1 bash deploy/setup_observability.sh
@@ -70,7 +150,7 @@ aws xray get-trace-segment-destination --profile <profile> --region ap-northeast
 > [!NOTE]
 > 新账号第一次开启时，状态可能要 PENDING 10–15 分钟。这期间 ADOT 导出 span 会报 `400 Bad Request`（"The OTLP API is supported with CloudWatch Logs as a Trace Segment Destination"），日志不受影响。等状态变成 ACTIVE 即可。
 
-### 3. 本地运行，确认 span 已到达
+### 4. 本地运行，确认 span 已到达
 
 ```bash
 cp demo/otel.env.example demo/otel.env && echo "AWS_PROFILE=<profile>" >> demo/otel.env
@@ -89,7 +169,7 @@ filter `attributes.session.id` = 'localtest0001'
 
 预期能看到 `invoke_agent text2sql-demo`、若干 `chat ...` 和 `execute_tool ...`，scope 都是 `opentelemetry.instrumentation.mini_agent`。
 
-### 4. 部署到 EC2
+### 5. 部署到 EC2
 
 ```bash
 PROFILE=<profile> REGION=ap-northeast-1 bash deploy/deploy_ec2.sh
@@ -102,7 +182,7 @@ curl -s -u "$CRED" https://dxxxx.cloudfront.net/healthz
 
 CloudFront 部署需要 5–10 分钟，实例启动约 5 分钟。脚本可以重复执行，已存在的资源只做更新。可以通过环境变量覆盖的参数有：`AGENT_NAME`、`INSTANCE_TYPE`、`BEDROCK_MODEL`、`BASIC_USER`、`BASIC_PASS`、`RATE_LIMIT`、`VPC_ID`、`SUBNET_ID`。
 
-### 5. 在看板上验证
+### 6. 在看板上验证
 
 依次进入 CloudWatch → GenAI Observability → Bedrock AgentCore → Agents → `text2sql-demo`：
 
@@ -239,7 +319,7 @@ AgentCore 没有单独的"导出结果" API。评测结果和遥测数据都落�
 | 把每条评测明细写进平台的数据库或数仓 | 在结果日志组上配置订阅过滤器（subscription filter）：<br>· 接 Firehose → S3 / OpenSearch / HTTP endpoint，近实时、免运维<br>· 接 Lambda，解析后写平台的 API、DB 或 Kafka，适合需要做字段映射的场景<br>不想常驻资源的话，也可以定时跑 Logs Insights 查询增量拉取（见下面的示例） |
 | 分数下降时通知平台 | 对指标配置 CloudWatch 告警 → SNS 或 EventBridge → 平台的 webhook |
 | 批量评测接入 CI 或发布流程 | 用 `StartBatchEvaluation` 提交、`GetBatchEvaluation` 轮询状态，完成后按 `evaluation_job.run_id` 从批量结果日志组取明细（即 `batch_eval.py` + `show_results.py` 的做法） |
-| 平台里点开某条记录看完整 trace | 生成深链跳转到 console：`https://<region>.console.aws.amazon.com/cloudwatch/home?region=<region>#gen-ai-observability/agent-core/agent/<agent>/session/<session_id>?serviceName=<service.name>`。查看者需要上面的 [console-viewer-policy](#iam-最小权限) |
+| 平台里点开某条记录看完整 trace | 生成深链跳转到 console：`https://<region>.console.aws.amazon.com/cloudwatch/home?region=<region>#gen-ai-observability/agent-core/agent/<agent>/session/<session_id>?serviceName=<service.name>`。查看者需要上面的 [console-viewer-policy](#1-iam-最小权限) |
 | 平台有自己的 trace 后端（如 Tempo、Jaeger、Langfuse） | 在 Agent 日志组上配置订阅过滤器，把 span 转发过去；或者把 ADOT 改为先发给一个 OTel Collector，由它同时导出到 CloudWatch 和平台。注意 CloudWatch 必须保留为其中一个目的地，因为 AgentCore 评测只从 CloudWatch 读 span |
 
 无论用哪种方式，**关联键都是 `session.id`**。业务系统在请求入口生成会话 ID 并通过 baggage 传给 Agent（见[遥测接入要点](#遥测接入要点)第 3 条），同时把它记在自己的业务记录上，之后评测结果、trace 和业务数据就能按这个 ID 关联起来。
@@ -308,87 +388,6 @@ Agent 日志组里 span 和普通日志混在一起，所以要加 `ispresent(na
 3. **源站校验**：安全组只放行 CloudFront origin-facing 前缀列表访问 8080 端口。但这个前缀列表是**所有 CloudFront 分发共用的**，别人用自己的分发也能连到我们的源站。所以我们的分发在回源时会带上 `X-Origin-Verify` 头，app 中间件校验不通过就返回 403。这个密钥存放在 SSM 参数 `/<agent>/origin-verify` 中，实例启动时写进 systemd 配置。
 
 实例上没有对 0.0.0.0/0 开放的端口，管理一律通过 SSM Session Manager。
-
-## IAM 最小权限
-
-策略模板位于 [`deploy/iam/`](../deploy/iam/)，用 `render.sh` 填入 region、账号和 Agent 名：
-
-```bash
-REGION=ap-northeast-1 ACCOUNT_ID=123456789012 AGENT_NAME=text2sql-demo \
-  bash deploy/iam/render.sh observability-evaluation-policy.json > /tmp/policy.json
-```
-
-| 场景 | 执行脚本的身份（本地 profile） | Agent 运行身份 |
-|---|---|---|
-| **A. 仅接入 Observability + Evaluations**（Agent 已部署在自己的环境中） | [`observability-evaluation-policy.json`](../deploy/iam/observability-evaluation-policy.json) | [`agent-runtime-policy.json`](../deploy/iam/agent-runtime-policy.json) |
-| **B. 部署本 demo + 接入** | 上一份，再加 [`demo-deploy-policy.json`](../deploy/iam/demo-deploy-policy.json) | 由 `deploy_ec2.sh` 创建（`<agent>-ec2` 角色），不需要手动配置 |
-| **C. 只在 console 看效果**（不跑脚本、不改配置） | [`console-viewer-policy.json`](../deploy/iam/console-viewer-policy.json) | — |
-
-A、B 两套策略已经用一个只挂了它们的测试角色完整验证过：从零部署、再次部署（更新路径）、回放、批量评测（含自定义 judge）、创建和停用在线评测。托管在 AgentCore Runtime 上的 Agent 不需要 `agent-runtime-policy`，直接用 Runtime 的执行角色即可。`teardown.sh` 需要 Delete 类权限，不在这个最小集合里，建议用管理员身份执行。
-
-C 是用只挂这份策略的角色登录 console 逐页验证出来的，验证范围包括：GenAI Observability 总览，Agent 的 Overview / Evaluations / OTEL sessions / Traces / Spans 各页，会话详情，trace 详情（span 树、消息内容、token 成本），以及 AgentCore 控制台的在线评测配置、evaluator 详情、批量评测列表和结果页。
-
-<details>
-<summary><b>observability-evaluation-policy</b>：setup_observability.sh 与 eval/*.py</summary>
-
-| 用途 | 权限 | 资源 |
-|---|---|---|
-| Transaction Search（账号级） | `xray:Get/UpdateTraceSegmentDestination`、`xray:Get/UpdateIndexingRule(s)`、`logs:PutResourcePolicy` | `*` |
-| Agent 日志组（创建，以及评测前查询 span 是否到齐） | `logs:CreateLogGroup/PutRetentionPolicy/CreateLogStream/StartQuery`、`logs:Describe/PutIndexPolicy` | `/aws/bedrock-agentcore/runtimes/<agent>` |
-| 评测结果日志组 | `logs:CreateLogGroup/PutRetentionPolicy/CreateLogStream/PutLogEvents/FilterLogEvents` | `/aws/bedrock-agentcore/evaluations/*` |
-| Evaluator、批量评测、在线评测 | `bedrock-agentcore:*Evaluator*`、`*BatchEvaluation*`、`*OnlineEvaluationConfig*` | `*` |
-| 自定义 judge 调用模型 | `bedrock:InvokeModel` | Claude |
-| 在线评测的执行角色 | `iam:Get/CreateRole`、`UpdateAssumeRolePolicy`、`PutRolePolicy`，以及限定只能传给 bedrock-agentcore 的 `iam:PassRole` | 仅 `AgentCoreEvaluationRole-<agent>` |
-
-</details>
-
-<details>
-<summary><b>agent-runtime-policy</b>：Agent 进程</summary>
-
-| 用途 | 权限 |
-|---|---|
-| 调用模型 | `bedrock:InvokeModel`（Claude） |
-| ADOT 导出 trace | `xray:PutTraceSegments`、`PutTelemetryRecords`、`GetSampling*`，与托管策略 `AWSXrayWriteOnlyAccess` 相同 |
-| ADOT 导出日志和 EMF 指标 | `logs:PutLogEvents/CreateLogStream/DescribeLogStreams/DescribeLogGroups`，仅限 Agent 日志组 |
-
-</details>
-
-<details>
-<summary><b>demo-deploy-policy</b>：deploy_ec2.sh</summary>
-
-| 用途 | 权限 | 资源 / 条件 |
-|---|---|---|
-| 实例角色和实例配置文件 | `iam:Get/CreateRole`、`TagRole`、`PutRolePolicy`、`AttachRolePolicy`、`*InstanceProfile`、`iam:PassRole` | 仅 `<agent>-ec2`；`AttachRolePolicy` 只允许挂 SSM Core 和 X-Ray 写入两个托管策略；`PassRole` 只能传给 ec2 |
-| 安全组和 EC2 | `ec2:Describe*`（5 个）、`CreateSecurityGroup`、`AuthorizeSecurityGroupIngress`、`RunInstances`、`CreateTags` | 写操作限定在当前 region |
-| AMI 查询、密钥存储 | `ssm:GetParameter`、`PutParameter`、`AddTagsToResource` | AMI 公共参数、`/<agent>/*` |
-| CloudFront、KeyValueStore | `cloudfront:*Distribution*`、`*Function`、`*KeyValueStore`、`cloudfront-keyvaluestore:DescribeKeyValueStore/PutKey` | `*` |
-| WAF | `wafv2:List/Get/Create/UpdateWebACL`、`TagResource` | `*` |
-| 在实例上执行命令 | `ssm:SendCommand/GetCommandInvocation/StartSession` | `*` |
-
-</details>
-
-<details>
-<summary><b>console-viewer-policy</b>：只读看板</summary>
-
-GenAI Observability 看板几乎所有数据都来自 Logs Insights 查询（span、会话、评测分数都是），不调用 bedrock-agentcore 的数据面 API。
-
-| 用途 | 权限 | 资源 |
-|---|---|---|
-| 看板查询 span、会话和评测结果 | `logs:StartQuery` | Agent 日志组、`/aws/bedrock-agentcore/evaluations/*`、`aws/spans` |
-| 批量评测结果页 | `logs:FilterLogEvents` | `/aws/bedrock-agentcore/evaluations/*` |
-| 取查询结果、列日志组 | `logs:GetQueryResults/StopQuery/DescribeLogGroups/DescribeMetricFilters` | `*`（这几个 API 不支持按日志组限定） |
-| 指标、告警和 trace 元信息 | `cloudwatch:GetMetricData/ListMetrics/DescribeAlarms/GetOTelEnrichment`、`xray:GetTraceSegmentDestination`、`oam:ListSinks` | `*` |
-| token 成本列 | `pricing:GetProducts`、`bedrock:ListFoundationModels/ListInferenceProfiles` | `*`。去掉后成本一栏显示为 "-"，其他不受影响 |
-| 评测配置和 evaluator 详情 | `bedrock-agentcore:List/Get` 下的 OnlineEvaluationConfig、Evaluator、BatchEvaluation，以及 `ListTagsForResource` | `*` |
-
-`logs:StartQuery` 按日志组限定后，看板使用的全账号查询（`SOURCE logGroups()`）不会报错，只会返回有权限的日志组里的数据。所以想让某个人只看到某个 Agent 的数据，限定 Agent 日志组即可；评测结果日志组按评测配置 ID 命名，需要的话也可以收窄到 `results/<config_id>`。
-
-剩下几个被拒绝的调用都来自 console 外框：账号菜单、通知中心、跨账号提示条（`account:GetAccountInformation`、`notifications:*`、`iam:GetRole`、`applicationinsights:ListProblems`、`freetier:*`、`uxc:*`、`ec2:DescribeRegions`），不影响看板数据，不需要授予。
-
-</details>
-
-> [!IMPORTANT]
-> `StartBatchEvaluation` 用的是**调用者自己的凭证**（FAS）去建结果日志组、查询 span、调用自定义 judge 的模型。所以执行脚本的身份需要评测结果日志组的写权限，以及 judge 模型的 `bedrock:InvokeModel`，否则会报 `FAS credentials do not have permission to ...`。内置 evaluator 由服务端调用模型，不需要这项权限。
 
 ## 常见问题
 
