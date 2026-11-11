@@ -28,10 +28,11 @@ def ensure_role(account: str) -> str:
     trust = {"Version": "2012-10-17", "Statement": [{
         "Effect": "Allow", "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
         "Action": "sts:AssumeRole",
-        "Condition": {"StringEquals": {"aws:SourceAccount": account, "aws:ResourceAccount": account},
-                      "ArnLike": {"aws:SourceArn": [
-                          f"arn:aws:bedrock-agentcore:{REGION}:{account}:evaluator/*",
-                          f"arn:aws:bedrock-agentcore:{REGION}:{account}:online-evaluation-config/*"]}}}]}
+        # NOTE: the docs' narrower SourceArn (evaluator/* + online-evaluation-config/*) makes
+        # CreateOnlineEvaluationConfig fail with "execution role does not have permissions to
+        # access the specified log groups" (tested 2026-11); scope to the account+region instead.
+        "Condition": {"StringEquals": {"aws:SourceAccount": account},
+                      "ArnLike": {"aws:SourceArn": f"arn:aws:bedrock-agentcore:{REGION}:{account}:*"}}}]}
     policy = {"Version": "2012-10-17", "Statement": [
         {"Sid": "ReadTraces", "Effect": "Allow",
          "Action": ["logs:DescribeLogGroups", "logs:GetQueryResults", "logs:StartQuery"], "Resource": "*"},
@@ -50,6 +51,7 @@ def ensure_role(account: str) -> str:
                       f"arn:aws:bedrock:*:{account}:inference-profile/*"]}]}
     try:
         arn = iam.get_role(RoleName=ROLE_NAME)["Role"]["Arn"]
+        iam.update_assume_role_policy(RoleName=ROLE_NAME, PolicyDocument=json.dumps(trust))
     except iam.exceptions.NoSuchEntityException:
         arn = iam.create_role(RoleName=ROLE_NAME, AssumeRolePolicyDocument=json.dumps(trust),
                               Description="AgentCore online evaluation for " + AGENT_NAME)["Role"]["Arn"]
