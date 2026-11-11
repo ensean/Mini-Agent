@@ -35,6 +35,28 @@ def ground_truth(sc: dict) -> dict:
     return {"inline": gt}
 
 
+def wait_for_spans(session_ids: list[str], t0: datetime, timeout_s: int = 600) -> None:
+    """Block until every session has an invoke_agent span queryable in the agent log group.
+    Ingestion usually takes 1-3 minutes; evaluating earlier fails with 'No spans were found'."""
+    logs = session().client("logs")
+    ids = ", ".join(f"'{s}'" for s in session_ids)
+    q = (f"filter `attributes.gen_ai.operation.name` = 'invoke_agent' and `attributes.session.id` in [{ids}]"
+         " | stats count(*) as turns by `attributes.session.id`")
+    deadline = time.time() + timeout_s
+    while True:
+        qid = logs.start_query(logGroupName=LOG_GROUP, startTime=int(t0.timestamp()),
+                               endTime=int(time.time()) + 60, queryString=q)["queryId"]
+        while (res := logs.get_query_results(queryId=qid))["status"] in ("Scheduled", "Running"):
+            time.sleep(2)
+        found = {f["value"] for row in res["results"] for f in row if f["field"] == "attributes.session.id"}
+        print(f"  spans visible for {len(found)}/{len(session_ids)} sessions")
+        if found >= set(session_ids):
+            return
+        if time.time() > deadline:
+            raise SystemExit(f"spans still missing for {sorted(set(session_ids) - found)}")
+        time.sleep(20)
+
+
 def main(run_file: str):
     run = json.loads(Path(run_file).read_text())
     scenarios = {s["id"]: s for s in json.loads((HERE / "ground_truth.json").read_text())}
@@ -45,8 +67,9 @@ def main(run_file: str):
     ac = session().client("bedrock-agentcore")
     t0 = datetime.fromtimestamp(run["started_at"], timezone.utc) - timedelta(minutes=5)
     t1 = datetime.fromtimestamp(run["ended_at"], timezone.utc) + timedelta(minutes=10)
+    wait_for_spans([s["session_id"] for s in sessions], t0)
     r = ac.start_batch_evaluation(
-        batchEvaluationName=f"t2s_{run['run_id']}",
+        batchEvaluationName=f"t2s_{run['run_id']}_{time.strftime('%H%M%S')}",
         evaluators=[{"evaluatorId": e} for e in evaluators],
         dataSourceConfig={"cloudWatchLogs": {
             "logGroupNames": [LOG_GROUP], "serviceNames": [AGENT_NAME],
