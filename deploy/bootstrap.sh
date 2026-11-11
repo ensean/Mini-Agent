@@ -58,6 +58,6 @@ printf '[Service]\nEnvironment=ORIGIN_VERIFY_SECRET=%s\n' "$SECRET" > /etc/syste
 systemctl daemon-reload
 systemctl enable text2sql
 systemctl restart text2sql
-for _ in $(seq 1 90); do curl -sf 127.0.0.1:8080/healthz && exit 0; sleep 2; done
+for _ in $(seq 1 90); do curl -sf -H "X-Origin-Verify: $SECRET" 127.0.0.1:8080/healthz && exit 0; sleep 2; done
 journalctl -u text2sql --no-pager | tail -50
 exit 1
