@@ -22,7 +22,7 @@ uv pip install --python .venv/bin/python -e ".[demo]"
 uvx mcp-clickhouse==0.7.0 --help >/dev/null 2>&1 </dev/null || true   # warm the uvx cache
 
 # ADOT config: the example file with this region. Credentials come from the instance role.
-sed "s/ap-northeast-1/$REGION/g" demo/otel.env.example > demo/otel.env
+sed -e "s/ap-northeast-1/$REGION/g" -e "s/text2sql-demo/$NAME/g" demo/otel.env.example > demo/otel.env
 
 cat >/etc/systemd/system/text2sql.service <<UNIT
 [Unit]
