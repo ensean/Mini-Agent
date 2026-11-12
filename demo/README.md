@@ -7,9 +7,13 @@
 
 技术栈：Bedrock Claude + [mcp-clickhouse](https://github.com/ClickHouse/mcp-clickhouse) + ClickHouse（合成的直播送礼数据，约 60 万行），以及 FastAPI。整套流程已在 ap-northeast-1 实测跑通（2026-11，ADOT 0.22.0）。
 
+> [!TIP]
+> **只想把自己现有的 Agent 接进来？** 看完[架构](#架构)后直接读[现有 Agent 接入指引](#现有-agent-接入指引idc--非-aws-环境)，细节按需跳到[遥测接入要点](#遥测接入要点)和[评测](#评测)。**想先完整跑一遍 demo？** 从[快速开始](#快速开始)开始。
+
 **目录**
 
 - [架构](#架构)
+- [现有 Agent 接入指引（IDC / 非 AWS 环境）](#现有-agent-接入指引idc--非-aws-环境)
 - [代码结构](#代码结构)
 - [快速开始](#快速开始)
 - [遥测接入要点](#遥测接入要点)
@@ -49,6 +53,133 @@ GenAI Observability 看板直接读这个日志组，按会话和 trace 展示�
 > **迁移到自己的 Agent 时，真正需要做的只有粉色部分**：在 Agent 代码里埋点，用 ADOT 启动进程，准备好 Agent 日志组，然后配置评测。WAF、CloudFront、Basic Auth、SSM 只是这个 demo 用来安全地对外开放访问的，跟接入 AgentCore 没有关系，可以换成你们现有的网关和鉴权。Agent 也不一定要部署在 EC2 上，凭证配置见[遥测接入要点](#遥测接入要点)第 5 条。
 
 span 和日志都写进同一个 Agent 日志组，所以配置评测数据源时，只需要指定这一个日志组，再按 `service.name` 过滤。
+
+## 现有 Agent 接入指引（IDC / 非 AWS 环境）
+
+这一节面向已经跑在自建机房（或其他云）上的 Agent，回答一个问题：**不迁移、不重新部署，要做哪些事才能用上 AgentCore 的可观测和评测？** Agent 本身仍然留在原地，只是多了一路遥测数据发往 AWS；AgentCore 负责读取这些数据、展示和打分。下文用 `<agent>` 指代 Agent 名，同时也是 `service.name`，`<region>` 指代 AWS 区域。
+
+```
+IDC 里的 Agent 进程 ──(HTTPS, SigV4)──► X-Ray OTLP 端点 ─┐
+  ├ 代码埋点（GenAI span）                                ├─► CloudWatch 日志组 /aws/bedrock-agentcore/runtimes/<agent>
+  └ ADOT（opentelemetry-instrument 启动）──► Logs OTLP 端点 ┘            │
+                                                                        ├─► GenAI Observability 看板
+                                                                        └─► AgentCore Evaluations（批量 / 在线）
+```
+
+### 第 0 步：确认网络出口
+
+Agent 所在机器需要能通过 HTTPS（443）访问以下地址：
+
+| 地址 | 用途 |
+|---|---|
+| `xray.<region>.amazonaws.com` | 发送 span（OTLP traces） |
+| `logs.<region>.amazonaws.com` | 发送日志和 EMF 指标（OTLP logs） |
+| `sts.<region>.amazonaws.com`，用 Roles Anywhere 时还要 `rolesanywhere.<region>.amazonaws.com` | 换取临时凭证 |
+| `bedrock-runtime.<region>.amazonaws.com` | 只在模型也用 Bedrock 时需要 |
+
+如果机器要经过 HTTP 代理才能出网，设置 `HTTPS_PROXY` 环境变量即可，ADOT 的导出器基于 `requests`，会读取这个变量。如果打算走专线（Direct Connect / VPN）加 VPC endpoint，需要先确认上面每个服务在你所用的区域都支持 VPC endpoint，这一点本 demo 没有验证。
+
+### 第 1 步：在 AWS 账号里做一次性准备
+
+由管理员执行，权限见 [快速开始第 1 步](#1-iam-最小权限) 里的 `observability-evaluation-policy`：
+
+```bash
+PROFILE=<admin-profile> REGION=<region> AGENT_NAME=<agent> bash deploy/setup_observability.sh
+```
+
+这个脚本会做三件事：开启 CloudWatch Transaction Search（每个账号、每个区域只需一次，新账号可能要 PENDING 10–15 分钟）；创建日志组 `/aws/bedrock-agentcore/runtimes/<agent>`；添加资源策略，允许 X-Ray 把 span 写进这个日志组。有多个 Agent 就按 Agent 名各执行一次。
+
+### 第 2 步：给 Agent 进程准备 AWS 凭证
+
+IDC 里的机器没有实例角色，凭证的几种配置方式见 [遥测接入要点第 5 条](#遥测接入要点)。推荐顺序：IAM Roles Anywhere（证书换临时凭证）优先；其次是专用 IAM 用户，在 profile 里再 assume 一个角色。
+
+这个身份的权限用 [`agent-runtime-policy.json`](../deploy/iam/agent-runtime-policy.json)，只允许写这一个 Agent 的日志组，以及向 X-Ray 写数据。**如果 Agent 用的模型不在 Bedrock 上**（比如 MiniMax 或自建模型），删掉其中 `Sid: InvokeClaude` 那一段即可，遥测本身不需要模型权限。
+
+### 第 3 步：在代码里埋点
+
+这是唯一需要改业务代码的一步，约定见 [遥测接入要点](#遥测接入要点) 第 1–3 条。以本仓库为例，框架层的改动如下：
+
+| 改动 | 位置 | 本 demo 的实现 |
+|---|---|---|
+| 新增埋点模块（只依赖 `opentelemetry-api`） | — | [`mini_agent/telemetry.py`](../mini_agent/telemetry.py)，约 200 行 |
+| 一轮对话 → `invoke_agent` span | Agent 主循环入口 | `Agent.run()` 上加 `@traced_agent_turn` |
+| 一次模型调用 → `chat` span | LLM 客户端 | `LLMClient.generate()` 上加 `@traced_generate` |
+| 一次工具调用 → `execute_tool` span | 工具调度处 | `tool.execute(...)` 改成 `traced_tool_call(...)` |
+| 把 `session.id` 放进 baggage | 请求入口（HTTP handler / 消息消费者） | 见 [`demo/app.py`](app.py) |
+
+如果你的 Agent 也是基于 Mini-Agent 改出来的，`telemetry.py` 基本可以原样复制，再在上面三处挂上即可。和上游 Mini-Agent 的完整差异可以看 [`main...agentcore-text2sql`](https://github.com/ensean/Mini-Agent/compare/main...agentcore-text2sql) 里 `mini_agent/` 目录下的改动。改完之后，可以参照 [`tests/test_telemetry.py`](../tests/test_telemetry.py) 写一个离线测试：用内存导出器检查 scope、span 层级、`session.id` 和内容属性。这个测试不需要 AWS 就能跑，测试通过再进入下一步。
+
+### 第 4 步：安装 ADOT，修改启动命令
+
+```bash
+pip install "aws-opentelemetry-distro>=0.18.0"     # 0.18 起才支持把 span 写进自定义日志组、在 span 上保留内容
+```
+
+参照 [`otel.env.example`](otel.env.example) 准备一个环境变量文件，把其中的 `text2sql-demo` 换成 `<agent>`，区域换成 `<region>`，再加上凭证相关的配置（例如 `AWS_PROFILE=<profile>`）。各变量的作用见 [遥测接入要点第 4 条](#遥测接入要点)。
+
+然后在原来的启动命令前加上 `opentelemetry-instrument`：
+
+```bash
+# 原来
+python -m my_agent.server
+# 现在
+opentelemetry-instrument python -m my_agent.server
+```
+
+不同的托管方式：
+
+```ini
+# systemd：EnvironmentFile 指向上面的环境变量文件
+[Service]
+EnvironmentFile=/etc/my-agent/otel.env
+Environment=HOME=/home/agent          # 让 SDK 找得到 ~/.aws/credentials
+ExecStart=/opt/my-agent/.venv/bin/opentelemetry-instrument /opt/my-agent/.venv/bin/python -m my_agent.server
+```
+
+```dockerfile
+# 容器：环境变量通过 --env-file 或 K8s ConfigMap/Secret 注入，凭证文件挂载进容器
+CMD ["opentelemetry-instrument", "python", "-m", "my_agent.server"]
+```
+
+几点注意：
+- 不要开 `--reload` 这类热重载。
+- gunicorn 这种先 fork 再派生 worker 的服务器，要按 OpenTelemetry 文档在 `post_fork` 钩子里初始化。
+- 多 worker、多实例部署都可以，但会话状态要放到外部存储里，并保证同一会话的每一轮都带同一个 `session.id`。
+- 如果不需要主机指标，在 `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` 里加上 `system_metrics`。默认它每分钟会上报一批 EMF 指标，是日志量的大头。
+
+### 第 5 步：到 CloudWatch 里确认数据
+
+发一个请求，带上一个你认得出来的 `session.id`。1–2 分钟后在 CloudWatch Logs Insights 里查日志组 `/aws/bedrock-agentcore/runtimes/<agent>`：
+
+```sql
+filter `attributes.session.id` = '<session_id>'
+| fields @timestamp, name, scope.name, attributes.gen_ai.operation.name
+| sort startTimeUnixNano asc
+```
+
+预期能看到 `invoke_agent`、`chat`、`execute_tool` 三类 span，scope 都是你在第 3 步里起的名字。然后打开 CloudWatch → GenAI Observability → Bedrock AgentCore → Agents → `<agent>`，看 OTEL sessions 和 Traces 两个页面。注意右上角的时间范围要覆盖刚才那次请求。
+
+查不到数据时，按这个顺序排查：
+1. Agent 进程的日志里有没有 `Failed to load AWS Credentials` 或 `Failed to export`；
+2. Transaction Search 的状态是不是 ACTIVE：`aws xray get-trace-segment-destination`；
+3. 网络出口是否放通了第 0 步那几个地址；
+4. 查到了 span 但 scope 不对：评测只认带 `opentelemetry.instrumentation.` 前缀的 scope。
+
+### 第 6 步：配置评测
+
+- **在线评测**（推荐先开）：不需要改代码，也不需要标准答案，对线上会话按比例抽样自动打分。`AGENT_NAME=<agent> python eval/online_eval.py` 会创建执行角色和评测配置，脚本里的 evaluator 列表可以按业务调整。也可以在 AgentCore 控制台 → Evaluations 里手动创建：数据源选"CloudWatch 日志组"，填 Agent 日志组和 `service.name`。生产环境的抽样比例建议设在 1–10%。
+- **批量评测 / 回归测试**：准备黄金数据集，回放生成会话后带标准答案打分，做法见 [评测](#评测) 一节。`eval/` 下的脚本都通过 `AGENT_NAME`、`AGENT_LOG_GROUP`、`AWS_REGION` 环境变量配置，可以直接复用；`replay.py` 要改成调用你们的 Agent 接口。
+- **自定义 evaluator**：业务口径要靠自定义 judge 来检查，参考 [`eval/create_custom_evaluators.py`](../eval/create_custom_evaluators.py)。
+
+结果会出现在看板的 Evaluations 页面、评测结果日志组，以及 `Bedrock-AgentCore/Evaluations` 指标里。要接入你们自己的平台，见 [集成到现有平台](#集成到现有平台)。
+
+### 上线前检查清单
+
+- [ ] 同一个会话的每一轮都带同一个 `session.id`，多 worker、多实例部署时也成立
+- [ ] 长输出（报告、HTML）有没有被截断：单个内容属性的截断阈值，本 demo 默认 32000 字符，由 `MINI_AGENT_OTEL_MAX_CONTENT_CHARS` 控制
+- [ ] 数据合规：prompt、工具结果和回答都会写进 CloudWatch。确认日志组的保留期，需要的话启用 KMS 加密。关掉内容采集后，评测就没法做了
+- [ ] 成本：日志摄取量（关掉 `system_metrics`）、Transaction Search 的索引比例、在线评测的抽样比例
+- [ ] 凭证用的是临时凭证（Roles Anywhere 或 assume role），权限只限于这个 Agent 的日志组
 
 ## 代码结构
 

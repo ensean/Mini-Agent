@@ -12,6 +12,8 @@ if [[ -f demo/otel.env ]]; then
 else
   echo "WARN: demo/otel.env not found -> telemetry disabled" >&2
 fi
-# Single process, no --reload: auto-instrumentation must wrap the serving process itself.
+# One worker because demo/app.py keeps each session's Agent (its multi-turn history) in process
+# memory; more workers would split a session across processes. No --reload: auto-instrumentation
+# must wrap the process that actually serves requests.
 exec .venv/bin/opentelemetry-instrument .venv/bin/uvicorn demo.app:app \
   --host "${HOST:-127.0.0.1}" --port "${PORT:-8080}" --workers 1
