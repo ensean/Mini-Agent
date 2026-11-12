@@ -26,7 +26,29 @@
 
 <sub>源文件：[`assets/architecture.drawio`](assets/architecture.drawio)，可用 draw.io 打开编辑。</sub>
 
-span 和日志都写进 Agent 自己的日志组，所以评测的数据源只需要配这一个日志组，再按 `service.name` 过滤即可。
+图中有三条链路，对应图例里的三种线：
+
+**① 请求链路（黑色实线）。** 用户在浏览器里提问，或者 `eval/replay.py` 回放评测集，请求依次经过 WAF（按 IP 限速）、CloudFront 和 CloudFront Function（Basic Auth），再回源到 EC2 上的 `demo/app.py`。app 为每个会话创建一个 Mini-Agent 实例：Agent 通过 Messages API 调用 Bedrock 上的 Claude，通过 stdio 调用 mcp-clickhouse，mcp-clickhouse 再对同一台机器上的 ClickHouse 执行 SQL。
+
+**② 遥测链路（粉色线，从 EC2 到 CloudWatch）。** 每处理一轮对话，`telemetry.py` 都会产生三类 span：invoke_agent、chat、execute_tool，`session.id` 写在每个 span 上。ADOT 把这些数据分两路导出：
+- span 通过 OTLP 发到 X-Ray 的 traces 端点，再写进 Agent 日志组的 `spans` 日志流；
+- 日志和 EMF 指标写进同一个日志组的 `runtime-logs` 日志流。
+
+GenAI Observability 看板直接读这个日志组，按会话和 trace 展示数据。
+
+**③ 评测链路（粉色线，CloudWatch 与 AgentCore Evaluations 之间）。** 批量评测和在线评测都按 `session.id` 从 Agent 日志组读取 span，交给 evaluator 打分。分数和 judge 的理由写回 CloudWatch：
+- 明细写进评测结果日志组；
+- 分数同时作为 `Bedrock-AgentCore/Evaluations` 命名空间下的指标，可以直接配告警；
+- 看板的 Evaluations 页面展示的也是这些结果。
+
+两种评测的区别：批量评测的会话来自回放，同时会带上标准答案；在线评测的会话来自线上流量，按抽样比例选取。
+
+**灰色虚线**表示依赖或配置读取，不是请求本身的路径：CloudFront Function 从 KeyValueStore 读取 Basic Auth 凭证；实例启动时从 SSM Parameter Store 读取源站密钥。
+
+> [!NOTE]
+> **迁移到自己的 Agent 时，真正需要做的只有粉色部分**：在 Agent 代码里埋点，用 ADOT 启动进程，准备好 Agent 日志组，然后配置评测。WAF、CloudFront、Basic Auth、SSM 只是这个 demo 用来安全地对外开放访问的，跟接入 AgentCore 没有关系，可以换成你们现有的网关和鉴权。Agent 也不一定要部署在 EC2 上，凭证配置见[遥测接入要点](#遥测接入要点)第 5 条。
+
+span 和日志都写进同一个 Agent 日志组，所以配置评测数据源时，只需要指定这一个日志组，再按 `service.name` 过滤。
 
 ## 代码结构
 
