@@ -1,0 +1,73 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "QueryAgentTelemetryAndEvalResults",
+      "Effect": "Allow",
+      "Action": "logs:StartQuery",
+      "Resource": [
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/${AGENT_NAME}",
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/${AGENT_NAME}:*",
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/evaluations/*",
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:aws/spans",
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:aws/spans:*"
+      ]
+    },
+    {
+      "Sid": "ReadEvalResults",
+      "Effect": "Allow",
+      "Action": "logs:FilterLogEvents",
+      "Resource": [
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/evaluations/*"
+      ]
+    },
+    {
+      "Sid": "LogsInsightsRead",
+      "Effect": "Allow",
+      "Action": [
+        "logs:GetQueryResults",
+        "logs:StopQuery",
+        "logs:DescribeLogGroups",
+        "logs:DescribeMetricFilters"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:GetOTelEnrichment",
+        "xray:GetTraceSegmentDestination",
+        "oam:ListSinks"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TokenCost",
+      "Effect": "Allow",
+      "Action": [
+        "pricing:GetProducts",
+        "bedrock:ListFoundationModels",
+        "bedrock:ListInferenceProfiles"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EvaluationConfigsRead",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:ListOnlineEvaluationConfigs",
+        "bedrock-agentcore:GetOnlineEvaluationConfig",
+        "bedrock-agentcore:ListEvaluators",
+        "bedrock-agentcore:GetEvaluator",
+        "bedrock-agentcore:ListBatchEvaluations",
+        "bedrock-agentcore:GetBatchEvaluation",
+        "bedrock-agentcore:ListTagsForResource"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

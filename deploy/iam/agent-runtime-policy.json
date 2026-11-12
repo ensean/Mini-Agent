@@ -1,0 +1,43 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvokeClaude",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:*:${ACCOUNT_ID}:inference-profile/*anthropic.claude*",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude*"
+      ]
+    },
+    {
+      "Sid": "OtlpTraces",
+      "Effect": "Allow",
+      "Action": [
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets",
+        "xray:GetSamplingStatisticSummaries"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OtlpLogsAndEmf",
+      "Effect": "Allow",
+      "Action": [
+        "logs:PutLogEvents",
+        "logs:CreateLogStream",
+        "logs:DescribeLogStreams",
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": [
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/${AGENT_NAME}",
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/${AGENT_NAME}:*"
+      ]
+    }
+  ]
+}

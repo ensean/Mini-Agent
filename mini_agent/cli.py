@@ -556,7 +556,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
         print(f"{Colors.DIM}   Retrying in {next_delay:.1f}s (attempt {attempt + 1})...{Colors.RESET}")
 
     # Convert provider string to LLMProvider enum
-    provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
+    provider = LLMProvider(config.llm.provider.lower())
 
     llm_client = LLMClient(
         api_key=config.llm.api_key,

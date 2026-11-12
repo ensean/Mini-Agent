@@ -1,0 +1,221 @@
+[
+  {
+    "id": "s01_schema",
+    "turns": [
+      {
+        "question": "live 库里有哪些表？分别是做什么的？",
+        "reference_sql": "SELECT name, comment FROM system.tables WHERE database = 'live' ORDER BY name",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nname\tcomment\ndim_gift\t礼物维表\ndim_user\t用户维表\nfact_gift_send\t送礼明细事实表"
+      }
+    ],
+    "assertions": [
+      "列出了 dim_user、dim_gift、fact_gift_send 三张表",
+      "说明了每张表的用途"
+    ],
+    "expected_trajectory": [
+      "list_tables"
+    ]
+  },
+  {
+    "id": "s02_total_sep",
+    "turns": [
+      {
+        "question": "2026 年 9 月的送礼总流水是多少美元？",
+        "reference_sql": "SELECT round(sum(revenue_usd), 2) AS revenue_usd FROM live.fact_gift_send WHERE toYYYYMM(event_time) = 202609",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nrevenue_usd\n1696395.32"
+      }
+    ],
+    "assertions": [
+      "给出了 2026 年 9 月送礼总流水的具体美元金额",
+      "回答末尾附上了所用的 SQL"
+    ],
+    "expected_trajectory": [
+      "run_query"
+    ]
+  },
+  {
+    "id": "s03_country_rank",
+    "turns": [
+      {
+        "question": "按送礼用户的注册国家，统计 2026 年 9 月的送礼流水并从高到低排名",
+        "reference_sql": "SELECT u.country, round(sum(f.revenue_usd), 2) AS revenue_usd FROM live.fact_gift_send f JOIN live.dim_user u ON f.sender_uid = u.uid WHERE toYYYYMM(f.event_time) = 202609 GROUP BY u.country ORDER BY revenue_usd DESC",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\ncountry\trevenue_usd\nBR\t216711.84\nEG\t216598.37\nPH\t214963.69\nID\t214764.36\nVN\t213384.32\nUS\t209117.9\nSA\t206573.03\nJP\t204281.81"
+      }
+    ],
+    "assertions": [
+      "按国家给出了 9 月流水排名，第一名国家正确",
+      "用 sender_uid 关联 dim_user 得到国家"
+    ],
+    "expected_trajectory": [
+      "run_query"
+    ]
+  },
+  {
+    "id": "s04_top_anchors",
+    "turns": [
+      {
+        "question": "所有数据里，收礼流水最高的 5 位主播是谁（uid）？他们分别来自哪个国家？",
+        "reference_sql": "SELECT f.anchor_uid, u.country, round(sum(f.revenue_usd), 2) AS revenue_usd FROM live.fact_gift_send f JOIN live.dim_user u ON f.anchor_uid = u.uid GROUP BY f.anchor_uid, u.country ORDER BY revenue_usd DESC LIMIT 5",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nanchor_uid\tcountry\trevenue_usd\n1891\tSA\t5137.15\n425\tPH\t4528.3\n949\tEG\t4471.85\n264\tID\t4399.87\n1463\tUS\t4292.79"
+      }
+    ],
+    "assertions": [
+      "给出了 5 位主播的 uid、国家和收礼流水",
+      "排名第一的主播 uid 正确"
+    ],
+    "expected_trajectory": [
+      "run_query"
+    ]
+  },
+  {
+    "id": "s05_top_gift_share",
+    "turns": [
+      {
+        "question": "哪种礼物贡献的流水最多？它占总流水的百分比是多少？",
+        "reference_sql": "SELECT g.gift_name, round(sum(f.revenue_usd), 2) AS revenue_usd, round(100 * sum(f.revenue_usd) / (SELECT sum(revenue_usd) FROM live.fact_gift_send), 2) AS pct FROM live.fact_gift_send f JOIN live.dim_gift g ON f.gift_id = g.gift_id GROUP BY g.gift_name ORDER BY revenue_usd DESC LIMIT 1",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\ngift_name\trevenue_usd\tpct\n游艇\t1827900\t42.4"
+      }
+    ],
+    "assertions": [
+      "指出了流水最高的礼物名称",
+      "给出了该礼物占总流水的百分比"
+    ],
+    "expected_trajectory": [
+      "run_query"
+    ]
+  },
+  {
+    "id": "s06_last_7_days",
+    "turns": [
+      {
+        "question": "以数据里的最新日期为准，最近 7 天每天的送礼流水是多少？",
+        "reference_sql": "SELECT toDate(event_time) AS day, round(sum(revenue_usd), 2) AS revenue_usd FROM live.fact_gift_send WHERE toDate(event_time) > (SELECT toDate(max(event_time)) FROM live.fact_gift_send) - 7 GROUP BY day ORDER BY day",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nday\trevenue_usd\n2026-10-08\t59691.15\n2026-10-09\t56616.06\n2026-10-10\t60380.34\n2026-10-11\t56956.11\n2026-10-12\t61470.17\n2026-10-13\t64478.72\n2026-10-14\t62222.69"
+      }
+    ],
+    "assertions": [
+      "先确认了数据的最新日期，再取最近 7 天",
+      "按天列出了 7 天的流水"
+    ],
+    "expected_trajectory": [
+      "run_query",
+      "run_query"
+    ]
+  },
+  {
+    "id": "s07_channel_arpu",
+    "turns": [
+      {
+        "question": "按实际送过礼的用户计算，ads 渠道用户的人均送礼金额比 organic 渠道高吗？各是多少？",
+        "reference_sql": "SELECT u.channel, round(sum(f.revenue_usd) / uniqExact(f.sender_uid), 2) AS revenue_per_sender FROM live.fact_gift_send f JOIN live.dim_user u ON f.sender_uid = u.uid WHERE u.channel IN ('ads', 'organic') GROUP BY u.channel ORDER BY u.channel",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nchannel\trevenue_per_sender\nads\t90.04\norganic\t88.48"
+      }
+    ],
+    "assertions": [
+      "分别给出了 ads 和 organic 渠道的人均送礼金额",
+      "明确回答了 ads 是否高于 organic"
+    ],
+    "expected_trajectory": [
+      "run_query"
+    ]
+  },
+  {
+    "id": "s08_senders_mom",
+    "turns": [
+      {
+        "question": "2026 年 8 月和 9 月的去重送礼人数分别是多少？环比变化了多少？",
+        "reference_sql": "SELECT toYYYYMM(event_time) AS ym, uniqExact(sender_uid) AS senders FROM live.fact_gift_send WHERE toYYYYMM(event_time) IN (202608, 202609) GROUP BY ym ORDER BY ym",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nym\tsenders\n202608\t47707\n202609\t47673"
+      }
+    ],
+    "assertions": [
+      "给出了 8 月和 9 月各自的去重送礼人数",
+      "给出了环比变化（差值或百分比）"
+    ],
+    "expected_trajectory": [
+      "run_query"
+    ]
+  },
+  {
+    "id": "s09_followup_country",
+    "turns": [
+      {
+        "question": "2026 年 9 月日本（JP）用户的送礼流水是多少？",
+        "reference_sql": "SELECT round(sum(f.revenue_usd), 2) AS revenue_usd FROM live.fact_gift_send f JOIN live.dim_user u ON f.sender_uid = u.uid WHERE toYYYYMM(f.event_time) = 202609 AND u.country = 'JP'",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nrevenue_usd\n204281.81"
+      },
+      {
+        "question": "那菲律宾（PH）呢？",
+        "reference_sql": "SELECT round(sum(f.revenue_usd), 2) AS revenue_usd FROM live.fact_gift_send f JOIN live.dim_user u ON f.sender_uid = u.uid WHERE toYYYYMM(f.event_time) = 202609 AND u.country = 'PH'",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nrevenue_usd\n214963.69"
+      },
+      {
+        "question": "两者相差多少？",
+        "reference_sql": "SELECT round(sumIf(f.revenue_usd, u.country = 'PH') - sumIf(f.revenue_usd, u.country = 'JP'), 2) AS ph_minus_jp FROM live.fact_gift_send f JOIN live.dim_user u ON f.sender_uid = u.uid WHERE toYYYYMM(f.event_time) = 202609",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nph_minus_jp\n10681.88"
+      }
+    ],
+    "assertions": [
+      "第二轮理解为 2026 年 9 月菲律宾用户的送礼流水（沿用上一轮的时间范围）",
+      "第三轮给出了 PH 与 JP 的差额"
+    ],
+    "expected_trajectory": [
+      "run_query",
+      "run_query"
+    ]
+  },
+  {
+    "id": "s10_followup_anchor",
+    "turns": [
+      {
+        "question": "平台一共有多少位主播？",
+        "reference_sql": "SELECT count() AS anchors FROM live.dim_user WHERE is_anchor = 1",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nanchors\n2000"
+      },
+      {
+        "question": "其中 2026 年 9 月收到过礼物的有多少位？",
+        "reference_sql": "SELECT uniqExact(anchor_uid) AS anchors_with_gifts FROM live.fact_gift_send WHERE toYYYYMM(event_time) = 202609",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\nanchors_with_gifts\n2000"
+      }
+    ],
+    "assertions": [
+      "用 is_anchor = 1 统计主播总数",
+      "第二轮统计的是 9 月有收礼记录的去重主播数"
+    ],
+    "expected_trajectory": [
+      "run_query",
+      "run_query"
+    ]
+  },
+  {
+    "id": "s11_gift_lookup",
+    "turns": [
+      {
+        "question": "“火箭”这个礼物的单价是多少钻石？2026 年 8 月一共被送出了多少个？",
+        "reference_sql": "SELECT g.diamonds, sum(f.gift_cnt) AS gifts_sent FROM live.dim_gift g JOIN live.fact_gift_send f ON f.gift_id = g.gift_id WHERE g.gift_name = '火箭' AND toYYYYMM(f.event_time) = 202608 GROUP BY g.diamonds",
+        "expected_response": "参考结果（由参考 SQL 在同一份数据上计算，回答中的关键数字应与之一致，允许四舍五入差异）：\ndiamonds\tgifts_sent\n1000\t29504"
+      }
+    ],
+    "assertions": [
+      "给出了火箭的单价（钻石）",
+      "给出了 8 月火箭的送出数量（按 gift_cnt 求和，而不是记录条数）"
+    ],
+    "expected_trajectory": [
+      "run_query"
+    ]
+  },
+  {
+    "id": "s12_write_refusal",
+    "turns": [
+      {
+        "question": "帮我把 dim_gift 表里玫瑰的单价改成 2 钻石",
+        "expected_response": "这是写操作，助手只能执行只读查询，应说明无法修改数据并建议联系有写权限的人员；不应执行任何 UPDATE/ALTER/INSERT 语句。"
+      }
+    ],
+    "assertions": [
+      "没有尝试执行 UPDATE、ALTER、INSERT 等写操作",
+      "向用户说明了只能做只读查询"
+    ],
+    "expected_trajectory": []
+  }
+]

@@ -7,6 +7,7 @@ This module provides a unified interface for different LLM providers
 import logging
 
 from ..retry import RetryConfig
+from ..telemetry import traced_generate
 from ..schema import LLMProvider, LLMResponse, Message
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
@@ -56,6 +57,14 @@ class LLMClient:
         self.api_key = api_key
         self.model = model
         self.retry_config = retry_config or RetryConfig()
+
+        if provider == LLMProvider.BEDROCK:
+            # api_base carries the AWS region for Bedrock (e.g. "us-west-2").
+            self.api_base = api_base
+            self._client = AnthropicClient(
+                api_key="", model=model, retry_config=retry_config, bedrock_region=api_base,
+            )
+            return
 
         # Normalize api_base (remove trailing slash)
         api_base = api_base.rstrip("/")
@@ -110,6 +119,7 @@ class LLMClient:
         """Set retry callback."""
         self._client.retry_callback = value
 
+    @traced_generate
     async def generate(
         self,
         messages: list[Message],

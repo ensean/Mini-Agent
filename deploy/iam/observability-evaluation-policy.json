@@ -1,0 +1,119 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Identity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "TransactionSearch",
+      "Effect": "Allow",
+      "Action": [
+        "xray:GetTraceSegmentDestination",
+        "xray:UpdateTraceSegmentDestination",
+        "xray:GetIndexingRules",
+        "xray:UpdateIndexingRule",
+        "logs:PutResourcePolicy",
+        "logs:DescribeResourcePolicies"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AgentLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:CreateLogStream",
+        "logs:DescribeLogStreams",
+        "logs:StartQuery",
+        "logs:DescribeIndexPolicies",
+        "logs:PutIndexPolicy"
+      ],
+      "Resource": [
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/${AGENT_NAME}",
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/${AGENT_NAME}:*"
+      ]
+    },
+    {
+      "Sid": "QueryResults",
+      "Effect": "Allow",
+      "Action": [
+        "logs:GetQueryResults",
+        "logs:StopQuery",
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EvaluationResultsLogs",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/evaluations/*"
+      ]
+    },
+    {
+      "Sid": "Evaluations",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:ListEvaluators",
+        "bedrock-agentcore:GetEvaluator",
+        "bedrock-agentcore:CreateEvaluator",
+        "bedrock-agentcore:UpdateEvaluator",
+        "bedrock-agentcore:StartBatchEvaluation",
+        "bedrock-agentcore:GetBatchEvaluation",
+        "bedrock-agentcore:ListBatchEvaluations",
+        "bedrock-agentcore:ListOnlineEvaluationConfigs",
+        "bedrock-agentcore:GetOnlineEvaluationConfig",
+        "bedrock-agentcore:CreateOnlineEvaluationConfig",
+        "bedrock-agentcore:UpdateOnlineEvaluationConfig"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CustomJudgeModel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:*:${ACCOUNT_ID}:inference-profile/*anthropic.claude*",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude*"
+      ]
+    },
+    {
+      "Sid": "OnlineEvaluationRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:CreateRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/AgentCoreEvaluationRole-${AGENT_NAME}"
+    },
+    {
+      "Sid": "PassOnlineEvaluationRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/AgentCoreEvaluationRole-${AGENT_NAME}",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "bedrock-agentcore.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

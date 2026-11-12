@@ -11,6 +11,7 @@ import tiktoken
 from .llm import LLMClient
 from .logger import AgentLogger
 from .schema import Message
+from .telemetry import traced_agent_turn, traced_tool_call
 from .tools.base import Tool, ToolResult
 from .utils import calculate_display_width
 
@@ -318,6 +319,7 @@ Requirements:
             # Use simple text summary on failure
             return summary_content
 
+    @traced_agent_turn(lambda self, *a, **kw: self)
     async def run(self, cancel_event: Optional[asyncio.Event] = None) -> str:
         """Execute agent loop until task is complete or max steps reached.
 
@@ -460,7 +462,7 @@ Requirements:
                 else:
                     try:
                         tool = self.tools[function_name]
-                        result = await tool.execute(**arguments)
+                        result = await traced_tool_call(tool, tool_call_id, arguments)
                     except Exception as e:
                         # Catch all exceptions during tool execution, convert to failed ToolResult
                         import traceback

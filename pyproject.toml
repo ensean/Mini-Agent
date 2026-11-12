@@ -19,9 +19,10 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
     "pip>=25.3",
     "pipx>=1.8.0",
-    "anthropic>=0.39.0",
+    "anthropic[bedrock]>=0.39.0",
     "openai>=1.57.4",
     "agent-client-protocol>=0.6.0",
+    "opentelemetry-api>=1.27.0",
 ]
 
 [project.scripts]
@@ -29,6 +30,13 @@ mini-agent = "mini_agent.cli:main"
 mini-agent-acp = "mini_agent.acp.server:main"
 
 [project.optional-dependencies]
+# Text-to-SQL web demo + AgentCore Observability/Evaluations (see demo/README.md)
+demo = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "aws-opentelemetry-distro>=0.18.0",
+    "boto3>=1.40.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

@@ -121,6 +121,9 @@ def async_retry(
                         f"retrying attempt {attempt + 2} after {delay:.2f} seconds"
                     )
 
+                    from .telemetry import record_retry
+                    record_retry(e, attempt + 1, delay)
+
                     # Call callback function
                     if on_retry:
                         on_retry(e, attempt + 1)
