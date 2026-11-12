@@ -194,6 +194,15 @@ CloudFront 部署需要 5–10 分钟，实例启动约 5 分钟。脚本可以�
 
 这一节是把同样的接入方式迁移到其他自研 Agent 时需要遵守的约定。
 
+**先选埋点方式。** 埋点有两条路，最后都是用 ADOT 发到 CloudWatch：
+
+| 方式 | 适用情况 | 评测识别的 scope |
+|---|---|---|
+| **第三方插桩库**：OpenInference、OpenLLMetry、OpenLit、Traceloop（[官方列出支持](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html)） | Agent 构建在这些库已经支持的 SDK 或框架上，装上即可，不用手写 span | `openinference.instrumentation.*` 或 `opentelemetry.instrumentation.*`，取决于用的是哪个库 |
+| **手写 span**，按 [Generic framework support](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/supported-frameworks-generic.html) 的约定 | 自研的 agent 循环。插桩库只能看到底层的模型 SDK 调用，看不到"一轮对话"和"工具调度"这两层 | `opentelemetry.instrumentation.<你的框架>` |
+
+Mini-Agent 属于后一种，本 demo 用的就是手写 span。下面 1–3 条说的都是手写时要遵守的约定，第 4、5 条两种方式都适用。
+
 **1. scope 名必须带规定的前缀。** AgentCore Evaluations 只通过 `opentelemetry.instrumentation.*`（OpenTelemetry GenAI 规范）或 `openinference.instrumentation.*`（OpenInference 规范）这两个前缀识别通用框架。其他 scope 名即使属性完全合规，也会被忽略。
 
 ```python
@@ -230,6 +239,19 @@ finally:
 | `AGENT_OBSERVABILITY_ENABLED=true`、`OTEL_PYTHON_DISTRO=aws_distro`、`OTEL_PYTHON_CONFIGURATOR=aws_configurator` | 启用 ADOT 的 GenAI 处理流程，并用 SigV4 签名导出到 CloudWatch |
 
 同一个 trace 里还会出现 FastAPI、anthropic SDK（`com.anthropic.sdk.python.bedrock`）和 MCP SDK（`mcp-python-sdk`）自带的 span。它们的 scope 不在评测识别的前缀里，所以不会和我们自己埋的 chat span 重复计算。
+
+**5. 非 EC2 环境的凭证。** ADOT 用 SigV4 签名导出数据，凭证走 AWS SDK 的默认凭证链（ADOT 内部用 `botocore.session.Session()` 获取）。Agent 调 Bedrock 用的 SDK 也走同一条链，所以模型调用和遥测导出共用一套凭证。凭证链按以下顺序查找，用第一个找到的：环境变量 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` → `~/.aws/credentials` 和 `~/.aws/config`（由 `AWS_PROFILE` 选择 profile，支持 `role_arn`、`credential_process`、SSO）→ 容器或 web identity 凭证 → EC2 实例角色。本 demo 在 EC2 上用的是实例角色；[快速开始第 4 步](#4-本地运行确认-span-已到达)在本地运行时用的是 `AWS_PROFILE`。
+
+| 部署环境 | 推荐做法 |
+|---|---|
+| 自建机房或其他云 | 首选 **IAM Roles Anywhere**：用 X.509 证书换临时凭证，在 profile 里配置 `credential_process = aws_signing_helper credential-process ...`，凭证由 SDK 自动刷新，不需要保存长期 AK/SK |
+| 只能用 AK/SK | 专门建一个 IAM 用户，写进 `~/.aws/credentials`（或通过环境变量注入），权限只挂 [`agent-runtime-policy.json`](../deploy/iam/agent-runtime-policy.json)。最好在 profile 里再配一个 `role_arn` 去 assume 角色，这样实际签名用的是临时凭证 |
+| AWS 上的 EKS / ECS / Lambda | Pod Identity 或 IRSA、ECS task role、Lambda 执行角色，都不需要凭证文件 |
+
+几个注意点：
+- 用 systemd 或容器运行时，进程的 `HOME` 不一定是你以为的那个目录，可能读不到 `~/.aws/credentials`。可以显式设置 `HOME`，或用 `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` 直接指定文件路径。
+- 必须设置 `AWS_REGION`，ADOT 靠它确定导出到哪个 region 的端点。
+- 找不到凭证时 Agent 照常运行，ADOT 只在日志里打一行 "Failed to load AWS Credentials"，span 会被悄悄丢掉。所以上线后要按[快速开始第 4 步](#4-本地运行确认-span-已到达)用 Logs Insights 确认数据确实到了。
 
 ## 评测
 
